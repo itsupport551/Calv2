@@ -29,7 +29,9 @@ export const config = {
   isDev: optionalEnv('NODE_ENV', 'development') === 'development',
   isProd: process.env.NODE_ENV === 'production',
   port: parseInt(optionalEnv('PORT', '4400'), 10),
-  host: optionalEnv('HOST', 'localhost'),
+  // Must bind 0.0.0.0 in containers (Railway/Docker) so the platform
+  // healthcheck and router can reach the server. localhost is unreachable there.
+  host: optionalEnv('HOST', '0.0.0.0'),
   apiBaseUrl: optionalEnv('API_BASE_URL', 'http://localhost:4400'),
 
   // ---- Database ----
@@ -66,9 +68,11 @@ export const config = {
   },
 
   // ---- Google OAuth ----
+  // Optional at boot — the server starts without them; Google login just
+  // won't work until these are configured. Avoids crashing the deploy.
   google: {
-    clientId: requireEnv('GOOGLE_CLIENT_ID'),
-    clientSecret: requireEnv('GOOGLE_CLIENT_SECRET'),
+    clientId: optionalEnv('GOOGLE_CLIENT_ID', ''),
+    clientSecret: optionalEnv('GOOGLE_CLIENT_SECRET', ''),
     redirectUri: optionalEnv('GOOGLE_REDIRECT_URI', 'http://localhost:4400/auth/google/callback'),
     scopes: [
       'https://www.googleapis.com/auth/calendar',
@@ -79,9 +83,10 @@ export const config = {
   },
 
   // ---- Microsoft OAuth ----
+  // Optional at boot — see Google note above.
   microsoft: {
-    clientId: requireEnv('MICROSOFT_CLIENT_ID'),
-    clientSecret: requireEnv('MICROSOFT_CLIENT_SECRET'),
+    clientId: optionalEnv('MICROSOFT_CLIENT_ID', ''),
+    clientSecret: optionalEnv('MICROSOFT_CLIENT_SECRET', ''),
     tenantId: optionalEnv('MICROSOFT_TENANT_ID', 'common'),
     redirectUri: optionalEnv('MICROSOFT_REDIRECT_URI', 'http://localhost:4400/auth/microsoft/callback'),
     scopes: [
