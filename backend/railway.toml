@@ -1,9 +1,12 @@
+# Railway uses the multi-stage Dockerfile in this directory.
+# The Dockerfile's CMD runs `prisma migrate deploy` before starting
+# the server, so the database schema is always up to date on boot.
+
 [build]
-builder = "NIXPACKS"
-buildCommand = "npm install && npm run build && npx prisma generate --schema=src/database/prisma/schema.prisma"
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
 
 [deploy]
-startCommand = "npx prisma migrate deploy --schema=src/database/prisma/schema.prisma && npm start"
 healthcheckPath = "/health"
 healthcheckTimeout = 30
 restartPolicyType = "ON_FAILURE"

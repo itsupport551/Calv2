@@ -49,4 +49,6 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 
 EXPOSE 4400
 
-CMD ["node", "dist/server.js"]
+# Apply any pending database migrations, then start the server.
+# `migrate deploy` is idempotent — safe to run on every boot.
+CMD ["sh", "-c", "npx prisma migrate deploy --schema=src/database/prisma/schema.prisma && node dist/server.js"]

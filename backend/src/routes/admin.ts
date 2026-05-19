@@ -151,7 +151,7 @@ router.get('/audit-logs', async (req: Request, res: Response) => {
   });
 
   // Convert BigInt ids to strings for JSON serialization
-  const logs = result.logs.map(log => ({
+  const logs = result.logs.map((log: any) => ({
     ...log,
     id: log.id.toString(),
   }));
@@ -192,7 +192,7 @@ router.get('/webhooks', async (_req: Request, res: Response) => {
 /** Update a user's email provider preference */
 router.patch('/users/:id/email-provider', async (req: Request, res: Response) => {
   const db = getDatabase();
-  const id: string = req.params.id;
+  const id = req.params.id as string;
   const { emailProvider } = req.body;
 
   const valid = ['AUTO', 'GOOGLE', 'MICROSOFT', 'SENDGRID'];
