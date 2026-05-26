@@ -21,6 +21,20 @@ export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
 
 export const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4400';
 
+// Track page-unload so apiFetch can suppress the "Failed to fetch" errors
+// the browser produces for in-flight requests when the user closes the
+// tab, refreshes, or navigates away. Without this guard, the Connect
+// button's catch handler popped up an alert that briefly blocked refresh.
+let isUnloading = false;
+if (typeof window !== 'undefined') {
+  window.addEventListener('beforeunload', () => { isUnloading = true; });
+  window.addEventListener('pagehide', () => { isUnloading = true; });
+  // visibilitychange to 'hidden' also fires on tab close on some browsers
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') isUnloading = true;
+  });
+}
+
 /**
  * fetch wrapper that automatically attaches the Supabase access-token
  * as a Bearer header. Use this for every call to our backend API.
@@ -51,6 +65,12 @@ export async function apiFetch<T = any>(path: string, init: RequestInit = {}): P
     });
   } catch (networkErr) {
     const e = networkErr as Error;
+    // Page is being unloaded — swallow the error. The current code path
+    // is about to be torn down with the page anyway, and surfacing the
+    // error as an alert blocks the refresh/close action.
+    if (isUnloading) {
+      return new Promise<T>(() => {}); // hangs intentionally; page is leaving
+    }
     if (e.name === 'AbortError') {
       throw new Error(`Request to ${path} timed out after 15s — backend not responding`);
     }

@@ -341,7 +341,7 @@ export default function DashboardPage() {
 function SyncMonitorPanel() {
   const [transactions, setTransactions] = useState<any[]>([]);
   useEffect(() => {
-    apiFetch('/api/admin/sync/transactions?limit=50').then(d => d.success && setTransactions(d.data.transactions));
+    apiFetch('/api/admin/sync/transactions?limit=50').then(d => d.success && setTransactions(d.data.transactions)).catch(() => {});
   }, []);
 
   return (
@@ -386,7 +386,7 @@ function UsersPanel() {
   const [updatingId, setUpdatingId] = useState<string | null>(null);
 
   useEffect(() => {
-    apiFetch('/api/admin/users?limit=100').then(d => d.success && setUsers(d.data.users));
+    apiFetch('/api/admin/users?limit=100').then(d => d.success && setUsers(d.data.users)).catch(() => {});
   }, []);
 
   async function changeEmailProvider(userId: string, provider: string) {
@@ -457,7 +457,7 @@ function UsersPanel() {
 function ConflictsPanel() {
   const [conflicts, setConflicts] = useState<any[]>([]);
   useEffect(() => {
-    apiFetch('/api/admin/conflicts').then(d => d.success && setConflicts(d.data.conflicts));
+    apiFetch('/api/admin/conflicts').then(d => d.success && setConflicts(d.data.conflicts)).catch(() => {});
   }, []);
 
   return (
@@ -489,7 +489,7 @@ function ConflictsPanel() {
 function AuditPanel() {
   const [logs, setLogs] = useState<any[]>([]);
   useEffect(() => {
-    apiFetch('/api/admin/audit-logs?limit=100').then(d => d.success && setLogs(d.data.logs));
+    apiFetch('/api/admin/audit-logs?limit=100').then(d => d.success && setLogs(d.data.logs)).catch(() => {});
   }, []);
 
   return (
@@ -525,7 +525,7 @@ function AuditPanel() {
 function WebhooksPanel() {
   const [subs, setSubs] = useState<any[]>([]);
   useEffect(() => {
-    apiFetch('/api/admin/webhooks').then(d => d.success && setSubs(d.data.subscriptions));
+    apiFetch('/api/admin/webhooks').then(d => d.success && setSubs(d.data.subscriptions)).catch(() => {});
   }, []);
 
   return (
