@@ -32,22 +32,10 @@ export const config = {
   // Must bind 0.0.0.0 in containers (Railway/Docker) so the platform
   // healthcheck and router can reach the server. localhost is unreachable there.
   host: optionalEnv('HOST', '0.0.0.0'),
-  apiBaseUrl: optionalEnv('API_BASE_URL', 'http://localhost:4400'),
 
   // ---- Database ----
-  // Uses a SEPARATE database called "calendarsync_app"
-  // Will NEVER interfere with your existing databases
   database: {
     url: requireEnv('DATABASE_URL'),
-  },
-
-  // ---- Redis ----
-  // Railway provides REDIS_URL; local dev uses host/port.
-  redis: {
-    url: process.env.REDIS_URL || undefined,
-    host: optionalEnv('REDIS_HOST', 'localhost'),
-    port: parseInt(optionalEnv('REDIS_PORT', '6379'), 10),
-    password: process.env.REDIS_PASSWORD || undefined,
   },
 
   // ---- Encryption ----
@@ -110,7 +98,6 @@ export const config = {
     allowedOrigins: optionalEnv('ALLOWED_ORIGINS', 'http://localhost:3000,http://localhost:4400').split(','),
     rateLimitWindowMs: parseInt(optionalEnv('RATE_LIMIT_WINDOW_MS', '900000'), 10),
     rateLimitMaxRequests: parseInt(optionalEnv('RATE_LIMIT_MAX_REQUESTS', '100'), 10),
-    bcryptRounds: parseInt(optionalEnv('BCRYPT_SALT_ROUNDS', '12'), 10),
   },
 
   // ---- Logging ----
