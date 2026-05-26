@@ -12,6 +12,9 @@ import { Router, Request, Response } from 'express';
 import { authenticateSupabase } from '../middleware/supabaseAuth';
 import getDatabase from '../database/client';
 import { decrypt } from '../crypto/encryption';
+import { deleteGoogleEvent } from '../connectors/google/calendar';
+import { deleteMicrosoftEvent } from '../connectors/microsoft/calendar';
+import { syncLogger } from '../utils/logger';
 
 /**
  * Some legacy rows were written before encryption was rolled out, so a
@@ -110,6 +113,76 @@ router.get('/events', async (req: Request, res: Response) => {
   }));
 
   res.json({ success: true, data: { events: decrypted, total: decrypted.length, from, to } });
+});
+
+/**
+ * Delete an event everywhere — source provider, mirror, and our DB.
+ *
+ * We don't trust the webhook to propagate the delete fast enough for
+ * the UI (it can take 1-2 minutes), and we don't want the row to come
+ * back in the next sync. So this endpoint:
+ *   1. Loads the event + the user's other-provider connection
+ *   2. Calls DELETE on the source provider's API (Google or Microsoft)
+ *   3. If a mirror exists, calls DELETE on the mirror's provider too
+ *   4. Removes our local row
+ * Each provider call is best-effort — a 404 there means it's already
+ * gone, which is fine for our purposes.
+ */
+router.delete('/events/:id', async (req: Request, res: Response) => {
+  const db = getDatabase();
+  const userId = req.authUser!.id;
+  const eventId = req.params.id as string;
+
+  const event = await db.event.findFirst({
+    where: { id: eventId, calendar: { userId } },
+    include: { calendar: true },
+  });
+  if (!event) {
+    res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Event not found' } });
+    return;
+  }
+
+  // Delete from the source provider.
+  try {
+    if (event.sourcePlatform === 'GOOGLE') {
+      await deleteGoogleEvent(userId, event.calendar.externalCalendarId, event.sourceEventId);
+    } else {
+      await deleteMicrosoftEvent(userId, event.sourceEventId);
+    }
+    syncLogger.info({ userId, eventId, provider: event.sourcePlatform }, 'Deleted source event');
+  } catch (err: any) {
+    // 404/410 from the provider means already gone — treat as success.
+    const status = err?.code ?? err?.statusCode ?? err?.response?.status;
+    if (status !== 404 && status !== 410 && status !== 'GONE') {
+      syncLogger.warn({ userId, eventId, err: err?.message }, 'Source delete failed (continuing)');
+    }
+  }
+
+  // Delete the mirror in the other provider, if one exists.
+  if (event.mirrorEventId && event.mirrorPlatform) {
+    // Find the mirror's calendar id in our DB (might be in a different Calendar row).
+    const mirrorCalendar = await db.calendar.findFirst({
+      where: { userId, provider: event.mirrorPlatform },
+    });
+    try {
+      if (event.mirrorPlatform === 'GOOGLE' && mirrorCalendar) {
+        await deleteGoogleEvent(userId, mirrorCalendar.externalCalendarId, event.mirrorEventId);
+      } else if (event.mirrorPlatform === 'MICROSOFT') {
+        await deleteMicrosoftEvent(userId, event.mirrorEventId);
+      }
+      syncLogger.info({ userId, eventId, mirrorProvider: event.mirrorPlatform }, 'Deleted mirror event');
+    } catch (err: any) {
+      const status = err?.code ?? err?.statusCode ?? err?.response?.status;
+      if (status !== 404 && status !== 410 && status !== 'GONE') {
+        syncLogger.warn({ userId, eventId, err: err?.message }, 'Mirror delete failed (continuing)');
+      }
+    }
+  }
+
+  // Remove our local row last.
+  await db.event.delete({ where: { id: eventId } });
+
+  res.json({ success: true, data: { id: eventId } });
 });
 
 /** Unlink a connected provider */

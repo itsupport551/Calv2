@@ -628,10 +628,29 @@ function MyCalendarPanel() {
   const [events, setEvents] = useState<MyEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [busyProvider, setBusyProvider] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   useEffect(() => {
     loadAll();
   }, []);
+
+  async function deleteEvent(id: string, title: string) {
+    const ok = confirm(`Delete "${title || 'this event'}" from BOTH Google and Outlook? This can't be undone.`);
+    if (!ok) return;
+    setDeletingId(id);
+    try {
+      const j = await apiFetch<{ success: boolean; error?: { message: string } }>(`/api/me/events/${id}`, { method: 'DELETE' });
+      if (j.success) {
+        setEvents(prev => prev.filter(e => e.id !== id));
+      } else {
+        alert(j.error?.message || 'Delete failed');
+      }
+    } catch (err) {
+      alert((err as Error).message);
+    } finally {
+      setDeletingId(null);
+    }
+  }
 
   async function loadAll() {
     setLoading(true);
@@ -735,14 +754,15 @@ function MyCalendarPanel() {
               <th>Source</th>
               <th>Synced</th>
               <th>Location</th>
+              <th></th>
             </tr>
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={5} style={{ textAlign: 'center', padding: '24px' }}>Loading…</td></tr>
+              <tr><td colSpan={6} style={{ textAlign: 'center', padding: '24px' }}>Loading…</td></tr>
             ) : events.length === 0 ? (
               <tr>
-                <td colSpan={5}>
+                <td colSpan={6}>
                   <div className="empty-state">
                     <div className="empty-state-icon">📭</div>
                     <p>No events yet. Connect a calendar above — events will appear within ~30 seconds.</p>
@@ -776,6 +796,17 @@ function MyCalendarPanel() {
                     )}
                   </td>
                   <td style={{ fontSize: '12px', color: 'var(--text-muted)' }}>{ev.location || '—'}</td>
+                  <td style={{ width: 80 }}>
+                    <button
+                      onClick={() => deleteEvent(ev.id, ev.title)}
+                      disabled={deletingId === ev.id}
+                      className="btn btn-ghost btn-sm"
+                      title="Delete from both Google and Outlook"
+                      style={{ color: '#ff6b6b', fontSize: 12 }}
+                    >
+                      {deletingId === ev.id ? '…' : '🗑 Delete'}
+                    </button>
+                  </td>
                 </tr>
               ))
             )}
