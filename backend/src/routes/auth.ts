@@ -110,21 +110,42 @@ router.get('/google/callback', async (req: Request, res: Response) => {
 
 // ---- Microsoft OAuth ----
 
-const msalApp = new ConfidentialClientApplication({
-  auth: {
-    clientId: config.microsoft.clientId,
-    clientSecret: config.microsoft.clientSecret,
-    authority: config.microsoft.authority,
-  },
-});
+// Lazy-init the MSAL client so an empty MICROSOFT_CLIENT_SECRET at boot
+// (e.g. before the operator has filled in OAuth creds on Railway) doesn't
+// crash the entire process at module-import time. The client is created
+// on first request; until then the rest of the app boots fine.
+let _msalApp: ConfidentialClientApplication | null = null;
+function getMsalApp(): ConfidentialClientApplication {
+  if (_msalApp) return _msalApp;
+  if (!config.microsoft.clientId || !config.microsoft.clientSecret) {
+    throw new Error(
+      'Microsoft OAuth is not configured. Set MICROSOFT_CLIENT_ID and MICROSOFT_CLIENT_SECRET in your environment.'
+    );
+  }
+  _msalApp = new ConfidentialClientApplication({
+    auth: {
+      clientId: config.microsoft.clientId,
+      clientSecret: config.microsoft.clientSecret,
+      authority: config.microsoft.authority,
+    },
+  });
+  return _msalApp;
+}
 
 /** Redirect user to Microsoft consent screen */
 router.get('/microsoft', authRateLimiter, async (_req: Request, res: Response) => {
-  const authUrl = await msalApp.getAuthCodeUrl({
-    scopes: [...config.microsoft.scopes],
-    redirectUri: config.microsoft.redirectUri,
-  });
-  res.redirect(authUrl);
+  try {
+    const authUrl = await getMsalApp().getAuthCodeUrl({
+      scopes: [...config.microsoft.scopes],
+      redirectUri: config.microsoft.redirectUri,
+    });
+    res.redirect(authUrl);
+  } catch (err) {
+    res.status(503).json({
+      success: false,
+      error: { code: 'MS_OAUTH_NOT_CONFIGURED', message: (err as Error).message },
+    });
+  }
 });
 
 /** Handle Microsoft OAuth callback */
@@ -136,7 +157,7 @@ router.get('/microsoft/callback', async (req: Request, res: Response) => {
       return;
     }
 
-    const result = await msalApp.acquireTokenByCode({
+    const result = await getMsalApp().acquireTokenByCode({
       code,
       scopes: [...config.microsoft.scopes],
       redirectUri: config.microsoft.redirectUri,

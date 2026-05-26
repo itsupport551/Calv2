@@ -20,14 +20,25 @@ import { CanonicalEvent, CalendarProvider, EventStatus, EventVisibility, ShowAsS
 import { v4 as uuidv4 } from 'uuid';
 import { microsoftRecurrenceToCanonical, canonicalToMicrosoftRecurrence } from '../../sync/recurringEvents';
 
-// MSAL instance for token acquisition
-const msalApp = new ConfidentialClientApplication({
-  auth: {
-    clientId: config.microsoft.clientId,
-    clientSecret: config.microsoft.clientSecret,
-    authority: config.microsoft.authority,
-  },
-});
+// Lazy-init MSAL — empty MICROSOFT_CLIENT_SECRET at boot would otherwise
+// crash the whole process from this module's import.
+let _msalApp: ConfidentialClientApplication | null = null;
+function msalApp(): ConfidentialClientApplication {
+  if (_msalApp) return _msalApp;
+  if (!config.microsoft.clientId || !config.microsoft.clientSecret) {
+    throw new Error(
+      'Microsoft OAuth is not configured. Set MICROSOFT_CLIENT_ID and MICROSOFT_CLIENT_SECRET in your environment.'
+    );
+  }
+  _msalApp = new ConfidentialClientApplication({
+    auth: {
+      clientId: config.microsoft.clientId,
+      clientSecret: config.microsoft.clientSecret,
+      authority: config.microsoft.authority,
+    },
+  });
+  return _msalApp;
+}
 
 /**
  * Get an authenticated Microsoft Graph client for a user.
@@ -53,7 +64,7 @@ export async function getMicrosoftGraphClient(userId: string): Promise<Client> {
   if (user.microsoftTokenExpiresAt && new Date() >= user.microsoftTokenExpiresAt) {
     syncLogger.info({ userId }, 'Refreshing expired Microsoft token');
     try {
-      const result = await msalApp.acquireTokenByRefreshToken({
+      const result = await msalApp().acquireTokenByRefreshToken({
         refreshToken: decrypt(user.microsoftRefreshToken),
         scopes: [...config.microsoft.scopes],
       });
