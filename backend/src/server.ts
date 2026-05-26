@@ -125,10 +125,19 @@ app.use((err: any, _req: express.Request, res: express.Response, _next: express.
 // ============================================================
 
 const server = app.listen(config.port, config.host, () => {
-  // Start webhook auto-renewal (runs every 6h, no ngrok needed)
-  startWebhookRenewalService();
-  // Start email notification worker (polls every 30s)
-  startNotificationWorker();
+  // Defensive startup: a failure in any background worker must NOT kill
+  // the HTTP server. /health needs to stay reachable so Railway's
+  // healthcheck passes and operators can diagnose from logs.
+  try {
+    startWebhookRenewalService();
+  } catch (err) {
+    logger.error({ err }, 'startWebhookRenewalService failed — continuing');
+  }
+  try {
+    startNotificationWorker();
+  } catch (err) {
+    logger.error({ err }, 'startNotificationWorker failed — continuing');
+  }
 
   logger.info(`
 ╔══════════════════════════════════════════════════════════╗

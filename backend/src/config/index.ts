@@ -11,10 +11,19 @@ import path from 'path';
 // Load .env from project root
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
+/**
+ * Read a required env var. In production, log a loud warning instead of
+ * throwing — that way the server still boots, /health stays reachable,
+ * and the user can diagnose missing config from logs and the health body
+ * rather than getting stuck on a failed Railway healthcheck.
+ */
 function requireEnv(key: string): string {
   const value = process.env[key];
-  if (!value && process.env.NODE_ENV === 'production') {
-    throw new Error(`[FATAL] Missing required environment variable: ${key}`);
+  if (!value) {
+    if (process.env.NODE_ENV === 'production') {
+      // eslint-disable-next-line no-console
+      console.error(`[FATAL CONFIG] Missing required environment variable: ${key} — the app will start but features needing this will fail.`);
+    }
   }
   return value || '';
 }

@@ -52,6 +52,8 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 
 EXPOSE 4400
 
-# Apply any pending database migrations, then start the server.
-# `migrate deploy` is idempotent — safe to run on every boot.
-CMD ["sh", "-c", "npx prisma migrate deploy --schema=src/database/prisma/schema.prisma && node dist/server.js"]
+# Try to apply pending migrations, then ALWAYS start the server.
+# If migrations fail (bad DATABASE_URL, DB down, etc.) we log a warning
+# and start anyway — so /health stays reachable and you can debug from
+# the Railway dashboard instead of getting stuck on a failed healthcheck.
+CMD ["sh", "-c", "npx prisma migrate deploy --schema=src/database/prisma/schema.prisma || echo '⚠️  Prisma migrate deploy FAILED — starting server anyway so /health is reachable. Check your DATABASE_URL / DIRECT_URL.'; exec node dist/server.js"]
