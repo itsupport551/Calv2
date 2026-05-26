@@ -1,36 +1,29 @@
 // ============================================================
-// Supabase Auth middleware
+// Supabase Auth middleware (HTTP-only — no SDK)
 // ============================================================
-// Verifies a Supabase access-token JWT from the Authorization header,
-// finds (or creates on first call) the corresponding row in our `users`
-// table, and attaches the local user id + email + role to req.user.
+// Verifies a Supabase access-token JWT from the Authorization header
+// by calling Supabase's /auth/v1/user endpoint directly. We deliberately
+// do NOT use @supabase/supabase-js on the server — that SDK eagerly
+// initializes a Realtime WebSocket client which on Node < 22 prints
+// "no native WebSocket support" warnings and causes 20-second hangs
+// before token verification returns.
 //
-// Using a Bearer token instead of a cookie sidesteps every cross-domain
-// cookie quirk between the Vercel frontend and the Railway backend.
+// On a verified token we find-or-create the corresponding row in our
+// `users` table and attach the local user id + email + role to
+// req.authUser.
 // ============================================================
 
 import { Request, Response, NextFunction } from 'express';
-import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import config from '../config';
 import getDatabase from '../database/client';
 import { authLogger } from '../utils/logger';
 import { UserRole } from '../types';
 
-let _supabase: SupabaseClient | null = null;
-function getSupabase(): SupabaseClient | null {
-  if (_supabase) return _supabase;
-  if (!config.supabase.url || !config.supabase.anonKey) return null;
-  _supabase = createClient(config.supabase.url, config.supabase.anonKey, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
-  return _supabase;
-}
-
 declare global {
   namespace Express {
     interface Request {
       authUser?: {
-        id: string;          // our internal user id (UUID)
+        id: string;
         email: string;
         role: UserRole;
         supabaseUserId: string;
@@ -39,9 +32,44 @@ declare global {
   }
 }
 
+interface SupabaseUser {
+  id: string;
+  email?: string | null;
+  user_metadata?: { full_name?: string };
+}
+
+/**
+ * Verify a Supabase JWT by calling /auth/v1/user with it. Returns the
+ * user object on success, null if the token is invalid/expired.
+ */
+async function verifySupabaseToken(token: string): Promise<SupabaseUser | null> {
+  if (!config.supabase.url || !config.supabase.anonKey) return null;
+
+  // 5s timeout — if Supabase Auth is slow, fail fast so the user sees
+  // a clear error instead of staring at a spinner.
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), 5000);
+
+  try {
+    const res = await fetch(`${config.supabase.url}/auth/v1/user`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        apikey: config.supabase.anonKey,
+      },
+      signal: controller.signal,
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as SupabaseUser;
+  } catch (err) {
+    authLogger.warn({ err: (err as Error).message }, 'Supabase token verification failed');
+    return null;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 export async function authenticateSupabase(req: Request, res: Response, next: NextFunction): Promise<void> {
-  const supabase = getSupabase();
-  if (!supabase) {
+  if (!config.supabase.url || !config.supabase.anonKey) {
     res.status(503).json({
       success: false,
       error: { code: 'AUTH_NOT_CONFIGURED', message: 'Supabase auth is not configured on the server (set SUPABASE_URL and SUPABASE_ANON_KEY)' },
@@ -59,9 +87,8 @@ export async function authenticateSupabase(req: Request, res: Response, next: Ne
     return;
   }
 
-  // Verify token by asking Supabase. Returns null if invalid/expired.
-  const { data, error } = await supabase.auth.getUser(token);
-  if (error || !data.user) {
+  const sbUser = await verifySupabaseToken(token);
+  if (!sbUser) {
     res.status(401).json({
       success: false,
       error: { code: 'INVALID_TOKEN', message: 'Invalid or expired Supabase session' },
@@ -69,32 +96,25 @@ export async function authenticateSupabase(req: Request, res: Response, next: Ne
     return;
   }
 
-  const sbUser = data.user;
   const db = getDatabase();
 
-  // Find-or-create our local user row. We key by supabaseUserId so the
-  // same Supabase identity always maps to the same internal user, even
-  // if the user later changes their email.
+  // Find-or-create our local user row keyed by supabaseUserId. Fall back
+  // to email match for legacy rows created via the old OAuth-login flow.
   let user = await db.user.findUnique({ where: { supabaseUserId: sbUser.id } });
-  if (!user) {
-    // Fall back to matching by email (in case the user was created via
-    // the legacy OAuth login flow before Supabase Auth was added).
-    if (sbUser.email) {
-      user = await db.user.findUnique({ where: { email: sbUser.email } });
-      if (user) {
-        user = await db.user.update({
-          where: { id: user.id },
-          data: { supabaseUserId: sbUser.id },
-        });
-      }
+  if (!user && sbUser.email) {
+    const byEmail = await db.user.findUnique({ where: { email: sbUser.email } });
+    if (byEmail) {
+      user = await db.user.update({
+        where: { id: byEmail.id },
+        data: { supabaseUserId: sbUser.id },
+      });
     }
   }
   if (!user) {
-    // First time we see this Supabase user — create the local row.
     user = await db.user.create({
       data: {
         email: sbUser.email || `${sbUser.id}@no-email.local`,
-        displayName: (sbUser.user_metadata?.full_name as string) || sbUser.email || 'New user',
+        displayName: sbUser.user_metadata?.full_name || sbUser.email || 'New user',
         role: 'USER',
         supabaseUserId: sbUser.id,
         isActive: true,

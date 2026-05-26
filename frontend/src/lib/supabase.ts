@@ -33,6 +33,11 @@ export async function apiFetch<T = any>(path: string, init: RequestInit = {}): P
   const token = data.session?.access_token;
   if (!token) throw new Error('Not authenticated — please sign in again');
 
+  // 15s timeout so a hung backend doesn't leave the UI stuck on
+  // "Working..." forever — user gets a clear error instead.
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
+
   let res: Response;
   try {
     res = await fetch(`${API_BASE}${path}`, {
@@ -42,9 +47,16 @@ export async function apiFetch<T = any>(path: string, init: RequestInit = {}): P
         ...(init.headers || {}),
         Authorization: `Bearer ${token}`,
       },
+      signal: controller.signal,
     });
   } catch (networkErr) {
-    throw new Error(`Network error reaching ${API_BASE}: ${(networkErr as Error).message}`);
+    const e = networkErr as Error;
+    if (e.name === 'AbortError') {
+      throw new Error(`Request to ${path} timed out after 15s — backend not responding`);
+    }
+    throw new Error(`Network error reaching ${API_BASE}: ${e.message}`);
+  } finally {
+    clearTimeout(timeoutId);
   }
 
   // Always try to parse JSON; backend always returns JSON on errors too.
