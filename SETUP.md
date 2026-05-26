@@ -299,7 +299,7 @@ Go to **[Google Cloud Console](https://console.cloud.google.com/)**:
    - Name: `CalendarSync Web`
    - Authorized redirect URIs (add both):
      - `http://localhost:4400/auth/google/callback`
-     - `https://YOUR-RAILWAY-URL.up.railway.app/auth/google/callback`
+     - `https://calv2-production.up.railway.app/auth/google/callback`
    - Click **Create** → copy **Client ID** and **Client Secret**
 
 | Variable | Where it goes |
@@ -330,7 +330,7 @@ Go to **[Azure Portal — App registrations](https://portal.azure.com/#view/Micr
    - Expires: **24 months** (max — recreate before it expires)
    - **Copy the Value immediately** (only shown once) → this is `MICROSOFT_CLIENT_SECRET`
 5. **Authentication** → add the production redirect URI too:
-   - `https://YOUR-RAILWAY-URL.up.railway.app/auth/microsoft/callback`
+   - `https://calv2-production.up.railway.app/auth/microsoft/callback`
 
 | Variable | Where it goes |
 |----------|---------------|
@@ -342,7 +342,7 @@ Go to **[Azure Portal — App registrations](https://portal.azure.com/#view/Micr
 ### Webhook URLs (Railway gives you these)
 | Variable | Value |
 |----------|-------|
-| `WEBHOOK_BASE_URL` | Your full Railway URL, e.g. `https://yourapp.up.railway.app` |
+| `WEBHOOK_BASE_URL` | Your full Railway URL, e.g. `https://calv2-production.up.railway.app` |
 | `GOOGLE_WEBHOOK_URL` | `${WEBHOOK_BASE_URL}/webhooks/google` |
 | `MICROSOFT_WEBHOOK_URL` | `${WEBHOOK_BASE_URL}/webhooks/microsoft` |
 
@@ -414,7 +414,7 @@ SMTP_FROM=verified-sender@yourdomain.com
 2. **Root Directory**: `frontend`.
 3. Framework preset: Next.js (auto-detected).
 4. Environment variables:
-   - `NEXT_PUBLIC_API_URL` = your Railway backend URL (e.g. `https://yourapp.up.railway.app`)
+   - `NEXT_PUBLIC_API_URL` = your Railway backend URL (e.g. `https://calv2-production.up.railway.app`)
 5. Deploy. Vercel gives you `https://yourapp.vercel.app`.
 6. Go back to Railway → update `ALLOWED_ORIGINS` to include the Vercel URL → redeploy.
 
@@ -462,7 +462,7 @@ npx prisma migrate deploy        # apply pending migrations
 node dist/server.js              # start the compiled server
 
 # Diagnostics
-curl https://YOUR-RAILWAY-URL/health     # should return { status: "healthy" }
+curl https://calv2-production.up.railway.app/health     # should return { status: "alive" }
 ```
 
 ---

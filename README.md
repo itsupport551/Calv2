@@ -372,11 +372,11 @@ Tests      30 passed (30)
 3. Set **Root Directory** to `frontend`
 4. Add environment variable:
    - Key: `NEXT_PUBLIC_API_URL`
-   - Value: your Railway URL (e.g. `https://calendarsync-production.railway.app`)
+   - Value: your Railway URL (e.g. `https://calv2-production.up.railway.app`)
 5. Click **Deploy**
 6. Vercel gives you a permanent URL like `https://calendarsync.vercel.app`
 7. In Railway → your backend service → Variables → update:
-   - `ALLOWED_ORIGINS=https://calendarsync.vercel.app,https://calendarsync-production.railway.app`
+   - `ALLOWED_ORIGINS=https://calendarsync.vercel.app,https://calv2-production.up.railway.app`
    - `ADMIN_DASHBOARD_URL=https://calendarsync.vercel.app`
 
 ---
