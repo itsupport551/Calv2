@@ -11,6 +11,21 @@
 import { Router, Request, Response } from 'express';
 import { authenticateSupabase } from '../middleware/supabaseAuth';
 import getDatabase from '../database/client';
+import { decrypt } from '../crypto/encryption';
+
+/**
+ * Some legacy rows were written before encryption was rolled out, so a
+ * `decrypt()` call on them will throw. Treat decryption failure as
+ * "value is already plaintext" rather than crashing the whole response.
+ */
+function safeDecrypt(value: string | null | undefined): string {
+  if (!value) return '';
+  try {
+    return decrypt(value);
+  } catch {
+    return value;
+  }
+}
 
 const router = Router();
 
@@ -85,7 +100,16 @@ router.get('/events', async (req: Request, res: Response) => {
     take: limit,
   });
 
-  res.json({ success: true, data: { events, total: events.length, from, to } });
+  // Title / description / location are AES-256-GCM encrypted at rest.
+  // Decrypt them on the way out — the API contract is plaintext.
+  const decrypted = events.map(ev => ({
+    ...ev,
+    title: safeDecrypt(ev.title),
+    description: safeDecrypt(ev.description),
+    location: safeDecrypt(ev.location),
+  }));
+
+  res.json({ success: true, data: { events: decrypted, total: decrypted.length, from, to } });
 });
 
 /** Unlink a connected provider */

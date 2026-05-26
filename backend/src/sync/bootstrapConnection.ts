@@ -2,10 +2,15 @@
 // Bootstrap a freshly-connected calendar
 // ============================================================
 // Called once, immediately after the user finishes OAuth for a provider.
-// Does three things so the dashboard isn't empty:
+// Does three things so the dashboard isn't empty AND so events flow both ways:
 //   1. Registers the user's primary calendar in our DB
-//   2. Pulls existing events (last 30d + next 365d) into our DB
-//   3. Subscribes to the provider's webhook so future changes stream in
+//   2. Subscribes to the provider's webhook + persists the subscription
+//      so future changes stream into /webhooks/{provider}
+//   3. Kicks off processSyncWebhook() — the same orchestrator the live
+//      webhook handler uses. That fetches the full event list, runs
+//      loop-prevention fingerprinting, AND creates mirror events in the
+//      other provider when present. This is what flips events from
+//      PENDING → SYNCED.
 //
 // Runs in the background — the OAuth callback returns immediately so
 // the user isn't blocked waiting for a slow Microsoft Graph call.
@@ -14,78 +19,17 @@
 import getDatabase from '../database/client';
 import config from '../config';
 import { syncLogger } from '../utils/logger';
-import { encrypt } from '../crypto/encryption';
+import { watchGoogleCalendar } from '../connectors/google/calendar';
 import {
-  listGoogleEvents,
-  googleEventToCanonical,
-  watchGoogleCalendar,
-} from '../connectors/google/calendar';
-import {
-  listMicrosoftEvents,
-  microsoftEventToCanonical,
   createMicrosoftSubscription,
   getMicrosoftGraphClient,
 } from '../connectors/microsoft/calendar';
-import { v4 as uuidv4 } from 'uuid';
-
-type DbProvider = 'GOOGLE' | 'MICROSOFT';
-import crypto from 'crypto';
-
-function fingerprintOf(title: string, start: Date | string, end: Date | string): string {
-  return crypto
-    .createHash('sha256')
-    .update(`${title}|${new Date(start).toISOString()}|${new Date(end).toISOString()}`)
-    .digest('hex');
-}
-
-async function upsertEvent(
-  calendarId: string,
-  sourcePlatform: DbProvider,
-  canonical: any,
-): Promise<void> {
-  const db = getDatabase();
-  if (!canonical.sourceEventId || !canonical.title) return;
-
-  const idempotencyKey = `${sourcePlatform}:${canonical.sourceEventId}`;
-
-  await db.event.upsert({
-    where: { idempotencyKey },
-    create: {
-      calendarId,
-      globalEventUuid: uuidv4(),
-      sourcePlatform,
-      sourceEventId: canonical.sourceEventId,
-      syncFingerprint: fingerprintOf(canonical.title, canonical.startTime, canonical.endTime),
-      idempotencyKey,
-      title: encrypt(canonical.title || ''),
-      description: encrypt(canonical.description || ''),
-      startTime: new Date(canonical.startTime),
-      endTime: new Date(canonical.endTime),
-      timezone: canonical.timezone || 'UTC',
-      isAllDay: !!canonical.isAllDay,
-      location: encrypt(canonical.location || ''),
-      organizerEmail: canonical.organizerEmail || '',
-      organizerName: canonical.organizerName || '',
-      isOrganizer: !!canonical.isOrganizer,
-      meetingLink: canonical.meetingLink || '',
-      etag: canonical.etag || '',
-      lastModifiedAt: canonical.lastModifiedAt ? new Date(canonical.lastModifiedAt) : new Date(),
-      originPlatform: sourcePlatform,
-      syncState: 'PENDING',
-    },
-    update: {
-      title: encrypt(canonical.title || ''),
-      startTime: new Date(canonical.startTime),
-      endTime: new Date(canonical.endTime),
-      lastModifiedAt: canonical.lastModifiedAt ? new Date(canonical.lastModifiedAt) : new Date(),
-    },
-  });
-}
+import { processSyncWebhook } from './orchestrator';
+import { CalendarProvider } from '../types';
 
 export async function bootstrapGoogleConnection(userId: string): Promise<void> {
   const db = getDatabase();
   try {
-    // Use the user's "primary" calendar — every Google account has one.
     const calendar = await db.calendar.upsert({
       where: {
         userId_provider_externalCalendarId: {
@@ -106,34 +50,13 @@ export async function bootstrapGoogleConnection(userId: string): Promise<void> {
       update: { syncEnabled: true },
     });
 
-    // Pull existing events (best-effort — log and continue on failure).
-    try {
-      const { events, nextSyncToken } = await listGoogleEvents(userId, 'primary');
-      for (const ge of events) {
-        try {
-          const canon = googleEventToCanonical(ge, calendar.id);
-          await upsertEvent(calendar.id, 'GOOGLE', canon);
-        } catch (err) {
-          syncLogger.warn({ err, eventId: ge.id }, 'Skipped malformed Google event during bootstrap');
-        }
-      }
-      await db.calendar.update({
-        where: { id: calendar.id },
-        data: { syncToken: nextSyncToken, lastSyncedAt: new Date() },
-      });
-      syncLogger.info({ userId, count: events.length }, 'Bootstrap: pulled Google events');
-    } catch (err) {
-      syncLogger.error({ userId, err }, 'Bootstrap: failed to pull Google events');
-    }
-
-    // Subscribe to webhook for future changes (best-effort).
+    // Subscribe webhook FIRST so any changes during the initial pull
+    // are captured, then persist the channel so /webhooks/google can
+    // recognise notifications.
     try {
       const webhookUrl = config.webhook.googleUrl || `${config.webhook.baseUrl}/webhooks/google`;
       if (webhookUrl && !webhookUrl.includes('your-domain.com')) {
         const sub = await watchGoogleCalendar(userId, 'primary', webhookUrl);
-        // Persist so /webhooks/google can recognise incoming notifications.
-        // Without this row the handler logs "Unknown Google webhook channel"
-        // for every event Google fires.
         await db.webhookSubscription.create({
           data: {
             calendarId: calendar.id,
@@ -151,6 +74,16 @@ export async function bootstrapGoogleConnection(userId: string): Promise<void> {
     } catch (err) {
       syncLogger.error({ userId, err: (err as Error).message }, 'Bootstrap: failed to subscribe Google webhook');
     }
+
+    // Run the same sync code-path the live webhook uses — it fetches
+    // events, dedupes via fingerprint, and creates mirrors in Outlook
+    // if the user has microsoftConnected. Setting events to SYNCED.
+    try {
+      await processSyncWebhook(userId, calendar.id, CalendarProvider.GOOGLE);
+      syncLogger.info({ userId }, 'Bootstrap: initial Google sync complete');
+    } catch (err) {
+      syncLogger.error({ userId, err: (err as Error).message }, 'Bootstrap: initial Google sync failed');
+    }
   } catch (err) {
     syncLogger.error({ userId, err: (err as Error).message, stack: (err as Error).stack }, 'Bootstrap Google failed entirely');
   }
@@ -159,7 +92,7 @@ export async function bootstrapGoogleConnection(userId: string): Promise<void> {
 export async function bootstrapMicrosoftConnection(userId: string): Promise<void> {
   const db = getDatabase();
   try {
-    // Ask MS Graph for the user's default calendar — gives us the real id.
+    // Ask MS Graph for the user's default calendar — gives us its real id.
     const client = await getMicrosoftGraphClient(userId);
     const defaultCal = await client.api('/me/calendar').get();
     const externalCalendarId: string = defaultCal.id;
@@ -186,25 +119,6 @@ export async function bootstrapMicrosoftConnection(userId: string): Promise<void
     });
 
     try {
-      const { events } = await listMicrosoftEvents(userId, externalCalendarId);
-      for (const me of events as any[]) {
-        try {
-          const canon = microsoftEventToCanonical(me, calendar.id);
-          await upsertEvent(calendar.id, 'MICROSOFT', canon);
-        } catch (err) {
-          syncLogger.warn({ err, eventId: me.id }, 'Skipped malformed Microsoft event during bootstrap');
-        }
-      }
-      await db.calendar.update({
-        where: { id: calendar.id },
-        data: { lastSyncedAt: new Date() },
-      });
-      syncLogger.info({ userId, count: (events as any[]).length }, 'Bootstrap: pulled Microsoft events');
-    } catch (err) {
-      syncLogger.error({ userId, err }, 'Bootstrap: failed to pull Microsoft events');
-    }
-
-    try {
       const webhookUrl = config.webhook.microsoftUrl || `${config.webhook.baseUrl}/webhooks/microsoft`;
       if (webhookUrl && !webhookUrl.includes('your-domain.com')) {
         const sub = await createMicrosoftSubscription(userId, externalCalendarId, webhookUrl);
@@ -212,7 +126,7 @@ export async function bootstrapMicrosoftConnection(userId: string): Promise<void
           data: {
             calendarId: calendar.id,
             provider: 'MICROSOFT',
-            channelId: sub.subscriptionId, // MS subscription id stored as channelId
+            channelId: sub.subscriptionId,
             resourceId: externalCalendarId,
             webhookUrl,
             clientState: userId,
@@ -224,6 +138,13 @@ export async function bootstrapMicrosoftConnection(userId: string): Promise<void
       }
     } catch (err) {
       syncLogger.error({ userId, err: (err as Error).message }, 'Bootstrap: failed to subscribe Microsoft webhook');
+    }
+
+    try {
+      await processSyncWebhook(userId, calendar.id, CalendarProvider.MICROSOFT);
+      syncLogger.info({ userId }, 'Bootstrap: initial Microsoft sync complete');
+    } catch (err) {
+      syncLogger.error({ userId, err: (err as Error).message }, 'Bootstrap: initial Microsoft sync failed');
     }
   } catch (err) {
     syncLogger.error({ userId, err: (err as Error).message, stack: (err as Error).stack }, 'Bootstrap Microsoft failed entirely');
