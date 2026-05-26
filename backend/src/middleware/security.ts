@@ -94,8 +94,11 @@ export const rateLimiter = rateLimit({
     res.status(429).json(options.message);
   },
   skip: (req) => {
-    // Don't rate-limit health checks
-    return req.path === '/health';
+    // Don't rate-limit health checks (Railway probe + browser polls) or
+    // OPTIONS preflight (CORS preflight is free).
+    if (req.method === 'OPTIONS') return true;
+    if (req.path === '/health' || req.path.startsWith('/health/')) return true;
+    return false;
   },
 });
 

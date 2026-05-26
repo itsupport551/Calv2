@@ -69,7 +69,9 @@ export default function DashboardPage() {
     if (!me) return;
     if (me.role !== 'ADMIN') { setLoading(false); return; }
     fetchStats();
-    const interval = setInterval(fetchStats, 30000);
+    // Poll every 60s — half the rate of the old 30s interval, plenty
+    // fresh for an admin view, gentler on the rate limiter.
+    const interval = setInterval(fetchStats, 60000);
     return () => clearInterval(interval);
   }, [me]);
 

@@ -136,7 +136,10 @@ export const config = {
       .map((o) => normalizeUrl(o.trim()))
       .filter(Boolean),
     rateLimitWindowMs: parseInt(optionalEnv('RATE_LIMIT_WINDOW_MS', '900000'), 10),
-    rateLimitMaxRequests: parseInt(optionalEnv('RATE_LIMIT_MAX_REQUESTS', '100'), 10),
+    // 100/15min is way too tight for an authenticated dashboard that
+    // polls multiple endpoints. 1000/15min ≈ 67/min — generous for a
+    // real user, still slow enough to throttle abusive scripts.
+    rateLimitMaxRequests: parseInt(optionalEnv('RATE_LIMIT_MAX_REQUESTS', '1000'), 10),
   },
 
   // ---- Logging ----
