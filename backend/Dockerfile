@@ -53,7 +53,10 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 EXPOSE 4400
 
 # Try to apply pending migrations, then ALWAYS start the server.
-# If migrations fail (bad DATABASE_URL, DB down, etc.) we log a warning
-# and start anyway — so /health stays reachable and you can debug from
-# the Railway dashboard instead of getting stuck on a failed healthcheck.
-CMD ["sh", "-c", "npx prisma migrate deploy --schema=src/database/prisma/schema.prisma || echo '⚠️  Prisma migrate deploy FAILED — starting server anyway so /health is reachable. Check your DATABASE_URL / DIRECT_URL.'; exec node dist/server.js"]
+# - `timeout 25` bounds the migration so a hanging DB connection (e.g.
+#   bad DATABASE_URL, IPv6-only direct URL Railway can't reach) cannot
+#   stall startup past Railway's healthcheck window.
+# - `|| true` catches both timeouts AND migration errors so node still
+#   launches and /health stays reachable for diagnosis.
+# - `exec node` makes node PID 1 for proper signal handling.
+CMD ["sh", "-c", "timeout 25 npx prisma migrate deploy --schema=src/database/prisma/schema.prisma || echo '⚠️  Prisma migrate deploy failed or timed out — starting server anyway so /health is reachable. Verify DATABASE_URL and DIRECT_URL are correct.'; exec node dist/server.js"]

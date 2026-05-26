@@ -8,7 +8,11 @@ dockerfilePath = "Dockerfile"
 
 [deploy]
 healthcheckPath = "/health"
-healthcheckTimeout = 30
+# 300s window: gives the container time to install Prisma engines, run
+# migrations (bounded to 25s in the Dockerfile CMD), and start node
+# without the deploy being killed prematurely. The Dockerfile CMD
+# guarantees node starts even if migrations time out.
+healthcheckTimeout = 300
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
 
