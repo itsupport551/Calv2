@@ -32,6 +32,22 @@ function optionalEnv(key: string, defaultValue: string): string {
   return process.env[key] || defaultValue;
 }
 
+/**
+ * Normalize a URL env var: prepends `https://` if the user forgot the
+ * protocol (a common mistake that breaks res.redirect() — Express treats
+ * protocol-less strings as relative paths and appends them to the current
+ * URL instead of redirecting away). Also strips any trailing slash so
+ * `${url}/dashboard` doesn't produce `//dashboard`.
+ */
+function normalizeUrl(value: string): string {
+  if (!value) return value;
+  let v = value.trim();
+  if (!/^https?:\/\//i.test(v)) {
+    v = 'https://' + v;
+  }
+  return v.replace(/\/+$/, '');
+}
+
 export const config = {
   // ---- Server ----
   env: optionalEnv('NODE_ENV', 'development'),
@@ -97,14 +113,19 @@ export const config = {
 
   // ---- Webhooks ----
   webhook: {
-    baseUrl: optionalEnv('WEBHOOK_BASE_URL', 'https://your-domain.com'),
-    googleUrl: optionalEnv('GOOGLE_WEBHOOK_URL', ''),
-    microsoftUrl: optionalEnv('MICROSOFT_WEBHOOK_URL', ''),
+    baseUrl: normalizeUrl(optionalEnv('WEBHOOK_BASE_URL', 'https://your-domain.com')),
+    googleUrl: normalizeUrl(optionalEnv('GOOGLE_WEBHOOK_URL', '')),
+    microsoftUrl: normalizeUrl(optionalEnv('MICROSOFT_WEBHOOK_URL', '')),
   },
 
   // ---- Security ----
   security: {
-    allowedOrigins: optionalEnv('ALLOWED_ORIGINS', 'http://localhost:3000,http://localhost:4400').split(','),
+    // Split + trim + normalize each origin so a missing "https://" prefix
+    // on an env value doesn't silently break CORS.
+    allowedOrigins: optionalEnv('ALLOWED_ORIGINS', 'http://localhost:3000,http://localhost:4400')
+      .split(',')
+      .map((o) => normalizeUrl(o.trim()))
+      .filter(Boolean),
     rateLimitWindowMs: parseInt(optionalEnv('RATE_LIMIT_WINDOW_MS', '900000'), 10),
     rateLimitMaxRequests: parseInt(optionalEnv('RATE_LIMIT_MAX_REQUESTS', '100'), 10),
   },
@@ -126,7 +147,7 @@ export const config = {
 
   // ---- Admin Dashboard ----
   adminDashboard: {
-    url: optionalEnv('ADMIN_DASHBOARD_URL', 'http://localhost:3000'),
+    url: normalizeUrl(optionalEnv('ADMIN_DASHBOARD_URL', 'http://localhost:3000')),
   },
 
   // ---- Sync Settings ----
