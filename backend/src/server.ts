@@ -34,6 +34,14 @@ import { startNotificationWorker, stopNotificationWorker } from './notifications
 
 const app = express();
 
+// Railway / any reverse proxy sits in front of us and adds X-Forwarded-For.
+// Without trust proxy, express-rate-limit refuses to read the header and
+// throws on every request (ERR_ERL_UNEXPECTED_X_FORWARDED_FOR), which made
+// every /api/* call hang until the client gave up (HTTP 499 in logs).
+// `1` = trust one hop (Railway's edge proxy) — safer than `true` which
+// would trust an arbitrary chain.
+app.set('trust proxy', 1);
+
 // ============================================================
 // Security Layer (applied to ALL requests)
 // ============================================================
