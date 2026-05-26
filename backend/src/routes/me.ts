@@ -12,7 +12,7 @@ import { Router, Request, Response } from 'express';
 import { authenticateSupabase } from '../middleware/supabaseAuth';
 import getDatabase from '../database/client';
 import { decrypt } from '../crypto/encryption';
-import { deleteGoogleEvent } from '../connectors/google/calendar';
+import { deleteGoogleEvent, stopGoogleWatch } from '../connectors/google/calendar';
 import { deleteMicrosoftEvent } from '../connectors/microsoft/calendar';
 import { syncLogger } from '../utils/logger';
 
@@ -213,6 +213,30 @@ router.post('/disconnect/:provider', async (req: Request, res: Response) => {
           microsoftRefreshToken: null,
           microsoftTokenExpiresAt: null,
         };
+
+  // Cancel webhook subscriptions BEFORE clearing tokens, while we still
+  // have the access token to authenticate the stop call. Without this,
+  // the old Google watch channel keeps firing notifications after a
+  // disconnect — and after a future reconnect, those stale channel ids
+  // produce "Unknown Google webhook channel" in the deploy logs because
+  // the new WebhookSubscription row has a different id.
+  const dbProvider = provider === 'google' ? 'GOOGLE' : 'MICROSOFT';
+  const subs = await db.webhookSubscription.findMany({
+    where: { provider: dbProvider, calendar: { userId } },
+  });
+  for (const sub of subs) {
+    if (provider === 'google') {
+      try {
+        await stopGoogleWatch(sub.channelId, sub.resourceId, userId);
+      } catch (err) {
+        syncLogger.warn({ userId, channelId: sub.channelId, err: (err as Error).message }, 'Failed to stop Google watch (continuing)');
+      }
+    }
+    // Microsoft subscription deletion would go here when we add it.
+  }
+  await db.webhookSubscription.deleteMany({
+    where: { provider: dbProvider, calendar: { userId } },
+  });
 
   const user = await db.user.update({ where: { id: userId }, data: update });
   res.json({

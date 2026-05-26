@@ -19,7 +19,7 @@
 import getDatabase from '../database/client';
 import config from '../config';
 import { syncLogger } from '../utils/logger';
-import { watchGoogleCalendar } from '../connectors/google/calendar';
+import { watchGoogleCalendar, stopGoogleWatch } from '../connectors/google/calendar';
 import {
   createMicrosoftSubscription,
   getMicrosoftGraphClient,
@@ -56,6 +56,22 @@ export async function bootstrapGoogleConnection(userId: string): Promise<void> {
     try {
       const webhookUrl = config.webhook.googleUrl || `${config.webhook.baseUrl}/webhooks/google`;
       if (webhookUrl && !webhookUrl.includes('your-domain.com')) {
+        // First, retire any stale subscription rows for this calendar.
+        // Reconnect-without-disconnect (or a previous deploy that crashed
+        // mid-bootstrap) would otherwise leave a row whose channelId no
+        // longer matches what Google has on its end → "Unknown channel".
+        const stale = await db.webhookSubscription.findMany({
+          where: { calendarId: calendar.id, provider: 'GOOGLE' },
+        });
+        for (const s of stale) {
+          try { await stopGoogleWatch(s.channelId, s.resourceId, userId); } catch { /* best effort */ }
+        }
+        if (stale.length) {
+          await db.webhookSubscription.deleteMany({
+            where: { calendarId: calendar.id, provider: 'GOOGLE' },
+          });
+        }
+
         const sub = await watchGoogleCalendar(userId, 'primary', webhookUrl);
         await db.webhookSubscription.create({
           data: {
@@ -121,6 +137,11 @@ export async function bootstrapMicrosoftConnection(userId: string): Promise<void
     try {
       const webhookUrl = config.webhook.microsoftUrl || `${config.webhook.baseUrl}/webhooks/microsoft`;
       if (webhookUrl && !webhookUrl.includes('your-domain.com')) {
+        // Retire any stale MS subscription rows for this calendar.
+        await db.webhookSubscription.deleteMany({
+          where: { calendarId: calendar.id, provider: 'MICROSOFT' },
+        });
+
         const sub = await createMicrosoftSubscription(userId, externalCalendarId, webhookUrl);
         await db.webhookSubscription.create({
           data: {

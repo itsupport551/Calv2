@@ -86,7 +86,13 @@ export async function processSyncWebhook(
     syncLogger.info({ userId, provider, duration: `${duration}ms`, processed: changedEvents.length }, 'Sync completed');
 
   } catch (error) {
-    syncLogger.error({ userId, calendarId, provider, error }, 'Sync processing failed');
+    // Render Error objects so the message + stack show up in deploy logs
+    // instead of "[object Object]" — otherwise debugging "Sync processing
+    // failed" requires guessing.
+    const err = error instanceof Error
+      ? { message: error.message, stack: error.stack, name: error.name }
+      : { error };
+    syncLogger.error({ userId, calendarId, provider, ...err }, 'Sync processing failed');
     await logAuditEvent({
       userId,
       action: AuditAction.SYNC_FAILED,
