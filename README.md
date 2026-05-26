@@ -72,8 +72,7 @@ CalendarSYNCAPP/
 │   │   └── server.ts                 ← Express entry point
 │   │
 │   ├── .env                          ← YOUR secrets (never commit this)
-│   ├── .env.example                  ← Template with instructions
-│   ├── .env.production.example       ← Railway/production variable guide
+│   ├── .env.example                  ← Template with instructions (covers local + Supabase)
 │   ├── railway.toml                  ← Railway deployment config
 │   ├── Dockerfile                    ← Docker build
 │   ├── docker-compose.yml            ← Local Docker stack
@@ -172,8 +171,8 @@ Install these before starting:
 ### Step 1 — Clone the repo
 
 ```bash
-git clone https://github.com/itsupport551/calendarSyncGentec.git
-cd calendarSyncGentec
+git clone https://github.com/itsupport551/Calv2.git
+cd Calv2
 ```
 
 ### Step 2 — Get Google OAuth credentials
@@ -350,24 +349,26 @@ Tests      30 passed (30)
 
 ### Deploy Backend → Railway
 
-1. Create account at [railway.app](https://railway.app) — sign up with GitHub
-2. Click **New Project** → **Deploy from GitHub repo** → select `calendarSyncGentec`
-3. Set **Root Directory** to `backend`
-4. In your project → **New** → **Database** → **Add PostgreSQL**
-   - Railway automatically sets `DATABASE_URL`
-5. In your project → **New** → **Database** → **Add Redis**
-   - Railway automatically sets `REDIS_URL`
-6. Go to your backend service → **Variables** tab → add all variables from `backend/.env.production.example`
-7. Railway gives you a permanent URL like `https://calendarsync-production.railway.app`
+1. **Set up Supabase first** (the database) — see [SETUP.md §7b](./SETUP.md) for the 5-minute walkthrough. You'll come away with two URLs: `DATABASE_URL` (pooled, port 6543) and `DIRECT_URL` (direct, port 5432).
+2. Create account at [railway.app](https://railway.app) — sign up with GitHub
+3. Click **New Project** → **Deploy from GitHub repo** → select **`Calv2`**
+4. Set **Root Directory** to `backend`
+5. In your project → **New** → **Database** → **Add Redis** (Railway sets the Redis vars automatically — reference them in the backend service)
+6. Go to your backend service → **Variables** tab → add:
+   - `DATABASE_URL` and `DIRECT_URL` from Supabase
+   - `ENCRYPTION_KEY`, `JWT_SECRET`, `SESSION_SECRET` from your local `backend/.env`
+   - `NODE_ENV=production`
+   - All Google/Microsoft/SMTP credentials (see SETUP.md §7 for the full list)
+7. Railway gives you a permanent URL like `https://calv2-production.up.railway.app`
 8. Go back to **Google Cloud Console** → Credentials → your OAuth client → add redirect URI:
-   - `https://calendarsync-production.railway.app/auth/google/callback`
+   - `https://calv2-production.up.railway.app/auth/google/callback`
 9. Go back to **Azure Portal** → App registrations → Authentication → add redirect URI:
-   - `https://calendarsync-production.railway.app/auth/microsoft/callback`
+   - `https://calv2-production.up.railway.app/auth/microsoft/callback`
 
 ### Deploy Frontend → Vercel
 
 1. Create account at [vercel.com](https://vercel.com)
-2. Click **New Project** → import `calendarSyncGentec` from GitHub
+2. Click **New Project** → import `Calv2` from GitHub
 3. Set **Root Directory** to `frontend`
 4. Add environment variable:
    - Key: `NEXT_PUBLIC_API_URL`

@@ -389,12 +389,10 @@ SMTP_FROM=verified-sender@yourdomain.com
 ## 8. Deploy to Railway (backend, 24/7)
 
 1. **Push to GitHub** (already done — branch `claude/eager-archimedes-0825b5`).
-2. Go to **[railway.app](https://railway.app)** → New Project → **Deploy from GitHub** → pick `calendarSyncGentec`.
+2. Go to **[railway.app](https://railway.app)** → New Project → **Deploy from GitHub** → pick **`Calv2`**.
 3. **Set Root Directory** (critical):
    - Click the service → Settings → Source → **Root Directory** = `backend` → Save
-4. **Database** — pick one:
-   - **Recommended: Supabase** (see §7b). Do NOT add Railway's Postgres plugin. Paste `DATABASE_URL` (pooled, port 6543) + `DIRECT_URL` (direct, port 5432) from Supabase as plain values into Railway's Variables.
-   - Alternative: Railway Postgres → `+ New` → Database → Add PostgreSQL → reference its `DATABASE_URL`, and set `DIRECT_URL` to the same value.
+4. **Database — Supabase** (see §7b for the walkthrough). Do NOT add Railway's Postgres plugin. After setting up Supabase, you'll paste two values into Railway's Variables: `DATABASE_URL` (pooled, port 6543) and `DIRECT_URL` (direct, port 5432).
 5. **Add Redis**: `+ New` → Database → Add Redis.
 6. **Link Redis variables** to the backend service → Variables tab:
    - `+ New Variable` → Add Reference → Redis → `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`
