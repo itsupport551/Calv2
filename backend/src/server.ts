@@ -27,6 +27,7 @@ import {
 import authRoutes from './routes/auth';
 import webhookRoutes from './routes/webhooks';
 import adminRoutes from './routes/admin';
+import meRoutes from './routes/me';
 import healthRoutes from './routes/health';
 import { startWebhookRenewalService, stopWebhookRenewalService } from './sync/webhookRenewal';
 import { startNotificationWorker, stopNotificationWorker } from './notifications/worker';
@@ -82,6 +83,9 @@ app.use('/webhooks', webhookRoutes);
 
 // Admin API — requires ADMIN role
 app.use('/api/admin', adminRoutes);
+
+// Per-user API — any authenticated user (profile, their events, disconnect, logout)
+app.use('/api/me', meRoutes);
 
 // Root route
 app.get('/', (_req, res) => {

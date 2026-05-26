@@ -9,9 +9,11 @@ interface DashboardStats {
   conflicts: { today: number };
 }
 
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4400';
+
 export default function DashboardPage() {
   const [stats, setStats] = useState<DashboardStats | null>(null);
-  const [activeTab, setActiveTab] = useState('overview');
+  const [activeTab, setActiveTab] = useState('mycalendar');
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -22,7 +24,7 @@ export default function DashboardPage() {
 
   async function fetchStats() {
     try {
-      const res = await fetch('/api/admin/dashboard/stats', { credentials: 'include' });
+      const res = await fetch(`${API_BASE}/api/admin/dashboard/stats`, { credentials: 'include' });
       const data = await res.json();
       if (data.success) setStats(data.data);
     } catch (error) {
@@ -33,6 +35,7 @@ export default function DashboardPage() {
   }
 
   const navItems = [
+    { id: 'mycalendar', icon: '📅', label: 'My Calendar' },
     { id: 'overview', icon: '📊', label: 'Overview' },
     { id: 'sync', icon: '🔄', label: 'Sync Monitor' },
     { id: 'users', icon: '👥', label: 'Users' },
@@ -75,6 +78,16 @@ export default function DashboardPage() {
 
       {/* Main Content */}
       <main className="main-content">
+        {activeTab === 'mycalendar' && (
+          <div className="animate-in">
+            <div className="page-header">
+              <h1 className="page-title">My Calendar</h1>
+              <p className="page-subtitle">Connect your accounts and see all your events in one place</p>
+            </div>
+            <MyCalendarPanel />
+          </div>
+        )}
+
         {activeTab === 'overview' && (
           <div className="animate-in">
             <div className="page-header">
@@ -259,7 +272,7 @@ export default function DashboardPage() {
 function SyncMonitorPanel() {
   const [transactions, setTransactions] = useState<any[]>([]);
   useEffect(() => {
-    fetch('/api/admin/sync/transactions?limit=50', { credentials: 'include' })
+    fetch(`${API_BASE}/api/admin/sync/transactions?limit=50`, { credentials: 'include' })
       .then(r => r.json()).then(d => d.success && setTransactions(d.data.transactions));
   }, []);
 
@@ -305,14 +318,14 @@ function UsersPanel() {
   const [updatingId, setUpdatingId] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch('/api/admin/users?limit=100', { credentials: 'include' })
+    fetch(`${API_BASE}/api/admin/users?limit=100`, { credentials: 'include' })
       .then(r => r.json()).then(d => d.success && setUsers(d.data.users));
   }, []);
 
   async function changeEmailProvider(userId: string, provider: string) {
     setUpdatingId(userId);
     try {
-      const res = await fetch(`/api/admin/users/${userId}/email-provider`, {
+      const res = await fetch(`${API_BASE}/api/admin/users/${userId}/email-provider`, {
         method: 'PATCH',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
@@ -380,7 +393,7 @@ function UsersPanel() {
 function ConflictsPanel() {
   const [conflicts, setConflicts] = useState<any[]>([]);
   useEffect(() => {
-    fetch('/api/admin/conflicts', { credentials: 'include' })
+    fetch(`${API_BASE}/api/admin/conflicts`, { credentials: 'include' })
       .then(r => r.json()).then(d => d.success && setConflicts(d.data.conflicts));
   }, []);
 
@@ -413,7 +426,7 @@ function ConflictsPanel() {
 function AuditPanel() {
   const [logs, setLogs] = useState<any[]>([]);
   useEffect(() => {
-    fetch('/api/admin/audit-logs?limit=100', { credentials: 'include' })
+    fetch(`${API_BASE}/api/admin/audit-logs?limit=100`, { credentials: 'include' })
       .then(r => r.json()).then(d => d.success && setLogs(d.data.logs));
   }, []);
 
@@ -450,7 +463,7 @@ function AuditPanel() {
 function WebhooksPanel() {
   const [subs, setSubs] = useState<any[]>([]);
   useEffect(() => {
-    fetch('/api/admin/webhooks', { credentials: 'include' })
+    fetch(`${API_BASE}/api/admin/webhooks`, { credentials: 'include' })
       .then(r => r.json()).then(d => d.success && setSubs(d.data.subscriptions));
   }, []);
 
@@ -482,7 +495,7 @@ function WebhooksPanel() {
 function SecurityPanel() {
   const [sec, setSec] = useState<any>(null);
   useEffect(() => {
-    fetch('/api/admin/security', { credentials: 'include' })
+    fetch(`${API_BASE}/api/admin/security`, { credentials: 'include' })
       .then(r => r.json()).then(d => d.success && setSec(d.data));
   }, []);
 
@@ -544,6 +557,204 @@ function SecurityPanel() {
         <div className="stat-value" style={{ fontSize: '16px', color: 'var(--success)' }}>Protected</div>
         <div className="stat-change positive">{sec?.features?.sqlInjectionProtection || 'Prisma ORM'}</div>
       </div>
+    </div>
+  );
+}
+
+// ---- My Calendar — personal panel with connect buttons + events ----
+
+interface MeUser {
+  id: string;
+  email: string;
+  displayName: string;
+  googleConnected: boolean;
+  microsoftConnected: boolean;
+  lastSyncAt: string | null;
+}
+
+interface MyEvent {
+  id: string;
+  title: string;
+  startTime: string;
+  endTime: string;
+  isAllDay: boolean;
+  location: string;
+  organizerEmail: string;
+  sourcePlatform: 'GOOGLE' | 'MICROSOFT';
+  mirrorPlatform: 'GOOGLE' | 'MICROSOFT' | null;
+  syncState: string;
+  meetingLink: string;
+}
+
+function MyCalendarPanel() {
+  const [me, setMe] = useState<MeUser | null>(null);
+  const [events, setEvents] = useState<MyEvent[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [busyProvider, setBusyProvider] = useState<string | null>(null);
+
+  useEffect(() => {
+    loadAll();
+  }, []);
+
+  async function loadAll() {
+    setLoading(true);
+    try {
+      const [meRes, evRes] = await Promise.all([
+        fetch(`${API_BASE}/api/me`, { credentials: 'include' }),
+        fetch(`${API_BASE}/api/me/events?limit=100`, { credentials: 'include' }),
+      ]);
+      const meData = await meRes.json();
+      const evData = await evRes.json();
+      if (meData.success) setMe(meData.data.user);
+      if (evData.success) setEvents(evData.data.events);
+    } catch (err) {
+      console.error('Failed to load /api/me data', err);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function disconnect(provider: 'google' | 'microsoft') {
+    if (!confirm(`Disconnect ${provider}? Your stored events stay; sync will stop.`)) return;
+    setBusyProvider(provider);
+    try {
+      await fetch(`${API_BASE}/api/me/disconnect/${provider}`, { method: 'POST', credentials: 'include' });
+      await loadAll();
+    } finally {
+      setBusyProvider(null);
+    }
+  }
+
+  const connect = (provider: 'google' | 'microsoft') => {
+    window.location.href = `${API_BASE}/auth/${provider}`;
+  };
+
+  return (
+    <>
+      {/* Connection cards */}
+      <div className="stats-grid animate-stagger" style={{ gridTemplateColumns: '1fr 1fr' }}>
+        <ProviderCard
+          icon="📧"
+          label="Google Calendar + Gmail"
+          connected={!!me?.googleConnected}
+          busy={busyProvider === 'google'}
+          onConnect={() => connect('google')}
+          onDisconnect={() => disconnect('google')}
+        />
+        <ProviderCard
+          icon="📨"
+          label="Microsoft Outlook + Graph"
+          connected={!!me?.microsoftConnected}
+          busy={busyProvider === 'microsoft'}
+          onConnect={() => connect('microsoft')}
+          onDisconnect={() => disconnect('microsoft')}
+        />
+      </div>
+
+      {/* Account header */}
+      {me && (
+        <div className="table-container" style={{ marginTop: '20px', padding: '16px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            <div style={{ fontSize: '28px' }}>👤</div>
+            <div>
+              <div style={{ color: 'var(--text-primary)', fontWeight: 600 }}>{me.displayName || me.email}</div>
+              <div style={{ color: 'var(--text-muted)', fontSize: '12px' }}>
+                {me.email} · last sync: {me.lastSyncAt ? new Date(me.lastSyncAt).toLocaleString() : 'never'}
+              </div>
+            </div>
+            <div style={{ marginLeft: 'auto' }}>
+              <button className="btn btn-ghost btn-sm" onClick={loadAll}>🔄 Refresh</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Events list */}
+      <div className="table-container" style={{ marginTop: '20px' }}>
+        <div className="table-header">
+          <h3 className="table-title">Upcoming Events ({events.length})</h3>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>When</th>
+              <th>Title</th>
+              <th>Source</th>
+              <th>Synced</th>
+              <th>Location</th>
+            </tr>
+          </thead>
+          <tbody>
+            {loading ? (
+              <tr><td colSpan={5} style={{ textAlign: 'center', padding: '24px' }}>Loading…</td></tr>
+            ) : events.length === 0 ? (
+              <tr>
+                <td colSpan={5}>
+                  <div className="empty-state">
+                    <div className="empty-state-icon">📭</div>
+                    <p>No events yet. Connect a calendar above — events will appear within ~30 seconds.</p>
+                  </div>
+                </td>
+              </tr>
+            ) : (
+              events.map(ev => (
+                <tr key={ev.id}>
+                  <td style={{ fontSize: '12px', whiteSpace: 'nowrap' }}>
+                    {ev.isAllDay
+                      ? new Date(ev.startTime).toLocaleDateString() + ' · all day'
+                      : new Date(ev.startTime).toLocaleString()}
+                  </td>
+                  <td>
+                    <strong style={{ color: 'var(--text-primary)' }}>{ev.title || '(untitled)'}</strong>
+                    {ev.meetingLink && (
+                      <a href={ev.meetingLink} target="_blank" rel="noreferrer" style={{ marginLeft: '8px', color: 'var(--accent-primary)', fontSize: '12px' }}>join ↗</a>
+                    )}
+                  </td>
+                  <td>
+                    <span className="badge badge-info">
+                      {ev.sourcePlatform === 'GOOGLE' ? '📧 Google' : '📨 Outlook'}
+                    </span>
+                  </td>
+                  <td>
+                    {ev.mirrorPlatform ? (
+                      <span className="badge badge-success">✓ {ev.syncState}</span>
+                    ) : (
+                      <span className="badge badge-warning">— {ev.syncState}</span>
+                    )}
+                  </td>
+                  <td style={{ fontSize: '12px', color: 'var(--text-muted)' }}>{ev.location || '—'}</td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+    </>
+  );
+}
+
+function ProviderCard({
+  icon, label, connected, busy, onConnect, onDisconnect,
+}: { icon: string; label: string; connected: boolean; busy: boolean; onConnect: () => void; onDisconnect: () => void; }) {
+  return (
+    <div className="stat-card" style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+        <span className="stat-icon">{icon}</span>
+        <div style={{ flex: 1 }}>
+          <div className="stat-label">{label}</div>
+          <div className="stat-value" style={{ fontSize: '16px', color: connected ? 'var(--success)' : 'var(--text-muted)' }}>
+            {connected ? '✓ Connected' : 'Not connected'}
+          </div>
+        </div>
+      </div>
+      <button
+        className={`btn ${connected ? 'btn-ghost' : 'btn-primary'} btn-sm`}
+        onClick={connected ? onDisconnect : onConnect}
+        disabled={busy}
+        style={{ width: '100%' }}
+      >
+        {busy ? 'Working…' : connected ? 'Disconnect' : 'Connect'}
+      </button>
     </div>
   );
 }

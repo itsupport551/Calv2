@@ -5,14 +5,32 @@
 import { Router, Request, Response } from 'express';
 import { OAuth2Client } from 'google-auth-library';
 import { ConfidentialClientApplication } from '@azure/msal-node';
+import jwt from 'jsonwebtoken';
 import config from '../config';
 import getDatabase from '../database/client';
 import { encrypt } from '../crypto/encryption';
 import { generateJWT } from '../middleware/auth';
 import { logAuditEvent } from '../audit/logger';
 import { authLogger } from '../utils/logger';
-import { AuditAction, AuditResourceType, AuditSource } from '../types';
+import { AuditAction, AuditResourceType, AuditSource, JwtPayload } from '../types';
 import { authRateLimiter } from '../middleware/security';
+
+/**
+ * If the request already carries a valid JWT cookie, return its user id.
+ * Used by OAuth callbacks so that connecting a second provider links to
+ * the existing logged-in account instead of creating a parallel user
+ * (which used to happen when the user's Google and Microsoft emails differ).
+ */
+function getExistingUserIdFromCookie(req: Request): string | null {
+  const token = req.cookies?.token;
+  if (!token) return null;
+  try {
+    const decoded = jwt.verify(token, config.jwt.secret) as JwtPayload;
+    return decoded.sub || null;
+  } catch {
+    return null;
+  }
+}
 
 const router = Router();
 
@@ -54,27 +72,39 @@ router.get('/google/callback', async (req: Request, res: Response) => {
 
     const db = getDatabase();
 
-    // Upsert user — works for both company and personal emails
-    const user = await db.user.upsert({
-      where: { email },
-      update: {
-        googleAccessToken: encrypt(tokens.access_token!),
-        googleRefreshToken: tokens.refresh_token ? encrypt(tokens.refresh_token) : undefined,
-        googleTokenExpiresAt: tokens.expiry_date ? new Date(tokens.expiry_date) : null,
-        googleConnected: true,
-        displayName: name,
-      },
-      create: {
-        email,
-        displayName: name,
-        role: 'USER',
-        googleAccessToken: encrypt(tokens.access_token!),
-        googleRefreshToken: encrypt(tokens.refresh_token || ''),
-        googleTokenExpiresAt: tokens.expiry_date ? new Date(tokens.expiry_date) : null,
-        googleConnected: true,
-        isActive: true,
-      },
-    });
+    // If user is already logged in (has a valid JWT cookie), LINK the new
+    // Google connection to that existing account instead of creating /
+    // upserting a separate user by email. This lets a single user connect
+    // both their Google AND Microsoft accounts even when the emails differ.
+    const existingUserId = getExistingUserIdFromCookie(req);
+
+    const googleData = {
+      googleAccessToken: encrypt(tokens.access_token!),
+      googleRefreshToken: tokens.refresh_token ? encrypt(tokens.refresh_token) : undefined,
+      googleTokenExpiresAt: tokens.expiry_date ? new Date(tokens.expiry_date) : null,
+      googleConnected: true,
+    };
+
+    let user;
+    if (existingUserId) {
+      user = await db.user.update({
+        where: { id: existingUserId },
+        data: googleData,
+      });
+    } else {
+      user = await db.user.upsert({
+        where: { email },
+        update: { ...googleData, displayName: name },
+        create: {
+          email,
+          displayName: name,
+          role: 'USER',
+          ...googleData,
+          googleRefreshToken: encrypt(tokens.refresh_token || ''),
+          isActive: true,
+        },
+      });
+    }
 
     // Generate JWT
     const jwt = generateJWT({ id: user.id, email: user.email, role: user.role });
@@ -169,24 +199,35 @@ router.get('/microsoft/callback', async (req: Request, res: Response) => {
 
     const db = getDatabase();
 
-    // Upsert user — works for both company and personal emails
-    const user = await db.user.upsert({
-      where: { email },
-      update: {
-        microsoftAccessToken: encrypt(result.accessToken),
-        microsoftTokenExpiresAt: result.expiresOn || null,
-        microsoftConnected: true,
-        displayName: name,
-      },
-      create: {
-        email,
-        displayName: name,
-        role: 'USER',
-        microsoftAccessToken: encrypt(result.accessToken),
-        microsoftConnected: true,
-        isActive: true,
-      },
-    });
+    // Link to existing logged-in user if there's a valid JWT cookie —
+    // so a user can connect both Google + Microsoft to one account.
+    const existingUserId = getExistingUserIdFromCookie(req);
+
+    const msData = {
+      microsoftAccessToken: encrypt(result.accessToken),
+      microsoftTokenExpiresAt: result.expiresOn || null,
+      microsoftConnected: true,
+    };
+
+    let user;
+    if (existingUserId) {
+      user = await db.user.update({
+        where: { id: existingUserId },
+        data: msData,
+      });
+    } else {
+      user = await db.user.upsert({
+        where: { email },
+        update: { ...msData, displayName: name },
+        create: {
+          email,
+          displayName: name,
+          role: 'USER',
+          ...msData,
+          isActive: true,
+        },
+      });
+    }
 
     const jwt = generateJWT({ id: user.id, email: user.email, role: user.role });
 
