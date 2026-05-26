@@ -24,20 +24,41 @@ export const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:440
 /**
  * fetch wrapper that automatically attaches the Supabase access-token
  * as a Bearer header. Use this for every call to our backend API.
- * Returns the JSON body directly.
+ * Returns the JSON body directly. Throws with a meaningful message on
+ * network failure or non-2xx responses so the UI surfaces real errors
+ * instead of getting stuck in a loading state.
  */
 export async function apiFetch<T = any>(path: string, init: RequestInit = {}): Promise<T> {
   const { data } = await supabase.auth.getSession();
   const token = data.session?.access_token;
-  if (!token) throw new Error('Not authenticated');
+  if (!token) throw new Error('Not authenticated — please sign in again');
 
-  const res = await fetch(`${API_BASE}${path}`, {
-    ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(init.headers || {}),
-      Authorization: `Bearer ${token}`,
-    },
-  });
-  return res.json() as Promise<T>;
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}${path}`, {
+      ...init,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(init.headers || {}),
+        Authorization: `Bearer ${token}`,
+      },
+    });
+  } catch (networkErr) {
+    throw new Error(`Network error reaching ${API_BASE}: ${(networkErr as Error).message}`);
+  }
+
+  // Always try to parse JSON; backend always returns JSON on errors too.
+  let body: any = null;
+  try { body = await res.json(); } catch { /* non-JSON body */ }
+
+  if (!res.ok) {
+    const msg = body?.error?.message
+      || body?.message
+      || `HTTP ${res.status} from ${path}`;
+    const err = new Error(msg);
+    (err as any).status = res.status;
+    (err as any).body = body;
+    throw err;
+  }
+  return body as T;
 }

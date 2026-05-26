@@ -196,8 +196,14 @@ async function gracefulShutdown(signal: string) {
 
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
-process.on('unhandledRejection', (reason) => {
-  logger.error({ reason }, 'Unhandled Promise Rejection');
+process.on('unhandledRejection', (reason: any) => {
+  // Log the actual error details — message, stack, code, name — so the
+  // Railway deploy logs show what's broken instead of just "Unhandled
+  // Promise Rejection" with no signal.
+  const detail = reason instanceof Error
+    ? { message: reason.message, name: reason.name, stack: reason.stack, code: (reason as any).code }
+    : { reason };
+  logger.error(detail, 'Unhandled Promise Rejection');
 });
 process.on('uncaughtException', (error) => {
   logger.error({ error }, 'Uncaught Exception');
