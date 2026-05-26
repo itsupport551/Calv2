@@ -10,9 +10,12 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-# Install dependencies first (cached unless package.json changes)
-COPY package.json ./
-RUN npm install --production=false
+# Install dependencies first (cached unless package*.json changes).
+# Copy the lockfile so `npm ci` runs deterministically — without it,
+# Railway/Docker fall back to `npm install` which is slower, non-reproducible,
+# and can pull a different Prisma/TS minor version than what was tested.
+COPY package.json package-lock.json ./
+RUN npm ci --include=dev
 
 # Copy source and build
 COPY tsconfig.json ./
@@ -30,11 +33,11 @@ RUN addgroup -g 1001 -S appgroup && \
 
 WORKDIR /app
 
-# Copy only production dependencies
-COPY package.json ./
-RUN npm install --production && npm cache clean --force
+# Copy only production dependencies (lockfile required for `npm ci`)
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev && npm cache clean --force
 
-# Copy built code and Prisma
+# Copy built code and Prisma artifacts
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
 COPY --from=builder /app/src/database/prisma ./src/database/prisma
