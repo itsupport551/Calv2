@@ -353,7 +353,7 @@ Tests      30 passed (30)
 2. Create account at [railway.app](https://railway.app) — sign up with GitHub
 3. Click **New Project** → **Deploy from GitHub repo** → select **`Calv2`**
 4. Set **Root Directory** to `backend`
-5. In your project → **New** → **Database** → **Add Redis** (Railway sets the Redis vars automatically — reference them in the backend service)
+5. **Redis is optional** — the code doesn't use it yet (reserved for future BullMQ queues). Skip the Redis plugin. If you ever need it, add it later and reference its `REDIS_URL` as a single variable.
 6. Go to your backend service → **Variables** tab → add:
    - `DATABASE_URL` and `DIRECT_URL` from Supabase
    - `ENCRYPTION_KEY`, `JWT_SECRET`, `SESSION_SECRET` from your local `backend/.env`

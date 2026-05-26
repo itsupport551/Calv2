@@ -271,12 +271,14 @@ This is the complete reference. Legend: **🔴 required** · 🟡 needed for ful
 
 **Important:** Supabase free projects **pause after 7 days of inactivity**. If your app is truly idle (no traffic), it pauses and the next request wakes it (~10s delay). For guaranteed always-on, upgrade to Pro ($25/mo) — but for an enterprise app with regular calendar webhook traffic, you'll never hit the inactivity threshold.
 
-### Redis
+### Redis (optional — skip for now)
+Redis isn't actively used by the code yet — it's reserved for future BullMQ job queues. **You can skip adding the Redis plugin on Railway entirely.** The app boots and runs fine without it.
+
+If you DO add Redis later (for queues), just reference the single Railway-provided URL:
+
 | Variable | Required? | How to get / set |
 |----------|-----------|------------------|
-| `REDIS_HOST` | 🟡 | Local: `localhost`. Railway: add Redis plugin → reference its host |
-| `REDIS_PORT` | 🟡 | `6379` default |
-| `REDIS_PASSWORD` | 🟡 | From Redis plugin |
+| `REDIS_URL` | ⚪ | Railway: add Redis plugin → `+ New Variable` → Add Reference → Redis → `REDIS_URL`. Single var; old `REDIS_HOST/PORT/PASSWORD` no longer needed |
 
 ### Google OAuth (for Google Calendar sync + Gmail send)
 
@@ -393,18 +395,16 @@ SMTP_FROM=verified-sender@yourdomain.com
 3. **Set Root Directory** (critical):
    - Click the service → Settings → Source → **Root Directory** = `backend` → Save
 4. **Database — Supabase** (see §7b for the walkthrough). Do NOT add Railway's Postgres plugin. After setting up Supabase, you'll paste two values into Railway's Variables: `DATABASE_URL` (pooled, port 6543) and `DIRECT_URL` (direct, port 5432).
-5. **Add Redis**: `+ New` → Database → Add Redis.
-6. **Link Redis variables** to the backend service → Variables tab:
-   - `+ New Variable` → Add Reference → Redis → `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`
-7. **Add the 5 required secrets** (copy from your local `backend/.env`):
+5. **Redis — skip for now.** The code doesn't use Redis yet (reserved for future BullMQ queues), so adding the Redis plugin is unnecessary. If you add it later: `+ New` → Database → Add Redis → reference the single `REDIS_URL` variable to the backend service.
+6. **Add the 5 required secrets** to the backend service → Variables tab (copy from your local `backend/.env`):
    - `DATABASE_URL`, `DIRECT_URL`, `ENCRYPTION_KEY`, `JWT_SECRET`, `SESSION_SECRET`, plus `NODE_ENV=production`
-8. **Deploy** — Railway auto-builds the Dockerfile. The container:
+7. **Deploy** — Railway auto-builds the Dockerfile. The container:
    - Runs `prisma migrate deploy` (creates all tables) → starts the server.
    - Healthcheck `/health` should turn green within ~60 seconds.
-9. **Copy the public URL** (Settings → Networking → Generate Domain).
-10. **Add URL-based vars** and OAuth/SMTP creds → redeploy:
+8. **Copy the public URL** (Settings → Networking → Generate Domain).
+9. **Add URL-based vars** and OAuth/SMTP creds → redeploy:
     - `API_BASE_URL`, `WEBHOOK_BASE_URL`, `GOOGLE_WEBHOOK_URL`, `MICROSOFT_WEBHOOK_URL`, `ALLOWED_ORIGINS`, all `GOOGLE_*`, `MICROSOFT_*`, `SMTP_*`
-11. **Update OAuth redirect URIs** in Google Cloud Console and Azure Portal to include the Railway URL.
+10. **Update OAuth redirect URIs** in Google Cloud Console and Azure Portal to include the Railway URL.
 
 ---
 
