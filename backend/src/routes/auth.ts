@@ -32,6 +32,7 @@ import { authLogger } from '../utils/logger';
 import { AuditAction, AuditResourceType, AuditSource } from '../types';
 import { authRateLimiter } from '../middleware/security';
 import { authenticateSupabase } from '../middleware/supabaseAuth';
+import { bootstrapGoogleConnection, bootstrapMicrosoftConnection } from '../sync/bootstrapConnection';
 
 const router = Router();
 
@@ -122,6 +123,14 @@ router.get('/google/callback', authRateLimiter, async (req: Request, res: Respon
     });
 
     authLogger.info({ userId }, 'Google calendar linked');
+
+    // Pull existing events + subscribe to webhook in the background so the
+    // OAuth callback responds immediately. Errors are swallowed inside
+    // bootstrapGoogleConnection — they log but never throw.
+    bootstrapGoogleConnection(userId).catch(err =>
+      authLogger.error({ userId, err }, 'Background bootstrap (google) failed'),
+    );
+
     res.redirect(`${dashboard}/dashboard?connected=google`);
   } catch (error) {
     authLogger.error({ error }, 'Google OAuth callback failed');
@@ -209,6 +218,11 @@ router.get('/microsoft/callback', authRateLimiter, async (req: Request, res: Res
     });
 
     authLogger.info({ userId }, 'Microsoft calendar linked');
+
+    bootstrapMicrosoftConnection(userId).catch(err =>
+      authLogger.error({ userId, err }, 'Background bootstrap (microsoft) failed'),
+    );
+
     res.redirect(`${dashboard}/dashboard?connected=microsoft`);
   } catch (error) {
     authLogger.error({ error }, 'Microsoft OAuth callback failed');
