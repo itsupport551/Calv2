@@ -124,10 +124,15 @@ router.get('/google/callback', async (req: Request, res: Response) => {
     authLogger.info({ userId: user.id, email }, 'Google OAuth login successful');
 
     // Set secure cookie and redirect to dashboard
+    // Cookie must be SameSite=None + Secure so the browser sends it on
+    // cross-origin fetches from the Vercel frontend back to the Railway
+    // backend. `lax` would silently block all our /api/* calls.
+    // In local dev (NODE_ENV=development) Secure is dropped so the cookie
+    // works over plain http://localhost.
     res.cookie('token', jwt, {
       httpOnly: true,
       secure: config.isProd,
-      sameSite: 'lax',
+      sameSite: config.isProd ? 'none' : 'lax',
       maxAge: 24 * 60 * 60 * 1000,
     });
 
@@ -244,10 +249,15 @@ router.get('/microsoft/callback', async (req: Request, res: Response) => {
 
     authLogger.info({ userId: user.id, email }, 'Microsoft OAuth login successful');
 
+    // Cookie must be SameSite=None + Secure so the browser sends it on
+    // cross-origin fetches from the Vercel frontend back to the Railway
+    // backend. `lax` would silently block all our /api/* calls.
+    // In local dev (NODE_ENV=development) Secure is dropped so the cookie
+    // works over plain http://localhost.
     res.cookie('token', jwt, {
       httpOnly: true,
       secure: config.isProd,
-      sameSite: 'lax',
+      sameSite: config.isProd ? 'none' : 'lax',
       maxAge: 24 * 60 * 60 * 1000,
     });
 

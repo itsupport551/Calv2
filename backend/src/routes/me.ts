@@ -130,7 +130,14 @@ router.post('/disconnect/:provider', async (req: Request, res: Response) => {
 
 /** Clear the auth cookie */
 router.post('/logout', async (_req: Request, res: Response) => {
-  res.clearCookie('token', { httpOnly: true, sameSite: 'lax' });
+  // Must match the attributes used when setting the cookie or some
+  // browsers won't clear it.
+  const isProd = process.env.NODE_ENV === 'production';
+  res.clearCookie('token', {
+    httpOnly: true,
+    secure: isProd,
+    sameSite: isProd ? 'none' : 'lax',
+  });
   res.json({ success: true });
 });
 
