@@ -93,10 +93,13 @@ export async function listGoogleEvents(
     if (syncToken) {
       params.syncToken = syncToken;
     } else {
-      // Initial sync — fetch last 30 days + next 365 days
+      // Initial sync window: now → +30 days. Matches what the dashboard
+      // shows. Past events are not synced (user requirement) and we don't
+      // pre-load the next year either — keeps the DB small and the first
+      // bootstrap fast.
       const now = new Date();
-      params.timeMin = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
-      params.timeMax = new Date(now.getTime() + 365 * 24 * 60 * 60 * 1000).toISOString();
+      params.timeMin = now.toISOString();
+      params.timeMax = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString();
     }
 
     const allEvents: calendar_v3.Schema$Event[] = [];

@@ -122,6 +122,23 @@ async function processEventChange(
     ? googleEventToCanonical(rawEvent, calendar.id)
     : microsoftEventToCanonical(rawEvent, calendar.id);
 
+  // 1a. Sync-window filter — past events and events more than 30 days
+  // ahead are ignored. Matches the dashboard's display window and the
+  // initial-fetch window for Google. Prevents stale events from MS delta
+  // queries from leaking into the DB or being mirrored.
+  if (normalizedEvent.startTime) {
+    const start = new Date(normalizedEvent.startTime);
+    const now = new Date();
+    const windowEnd = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+    if (start < now || start > windowEnd) {
+      syncLogger.debug(
+        { userId, sourceEventId: normalizedEvent.sourceEventId, startTime: start },
+        'Event outside (now → +30d) window — skipping',
+      );
+      return;
+    }
+  }
+
   const sourceEventId = normalizedEvent.sourceEventId!;
 
   // 2. LOOP PREVENTION — the most critical check

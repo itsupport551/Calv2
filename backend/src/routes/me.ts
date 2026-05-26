@@ -66,10 +66,13 @@ router.get('/events', async (req: Request, res: Response) => {
   const fromQuery = req.query.from as string | undefined;
   const toQuery = req.query.to as string | undefined;
 
-  // Default window: 30 days back, 90 days forward
+  // Default window: from NOW, 30 days forward. We deliberately omit past
+  // events — the dashboard's "Upcoming Events" section is for upcoming
+  // commitments, and a clutter-free 1-month forward window is what the
+  // user asked for.
   const now = new Date();
-  const defaultFrom = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-  const defaultTo = new Date(now.getTime() + 90 * 24 * 60 * 60 * 1000);
+  const defaultFrom = now;
+  const defaultTo = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
   const from = fromQuery ? new Date(fromQuery) : defaultFrom;
   const to = toQuery ? new Date(toQuery) : defaultTo;
 
@@ -236,6 +239,15 @@ router.post('/disconnect/:provider', async (req: Request, res: Response) => {
   }
   await db.webhookSubscription.deleteMany({
     where: { provider: dbProvider, calendar: { userId } },
+  });
+
+  // Wipe the Calendar rows for this provider. Events have onDelete:Cascade
+  // on calendarId so they vanish too — keeps the dashboard consistent with
+  // the new disconnected state (no orphan events showing for an unlinked
+  // provider). The user can reconnect and bootstrap will recreate a fresh
+  // Calendar + pull events.
+  await db.calendar.deleteMany({
+    where: { userId, provider: dbProvider },
   });
 
   const user = await db.user.update({ where: { id: userId }, data: update });
