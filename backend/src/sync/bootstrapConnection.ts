@@ -130,14 +130,29 @@ export async function bootstrapGoogleConnection(userId: string): Promise<void> {
     try {
       const webhookUrl = config.webhook.googleUrl || `${config.webhook.baseUrl}/webhooks/google`;
       if (webhookUrl && !webhookUrl.includes('your-domain.com')) {
-        await watchGoogleCalendar(userId, 'primary', webhookUrl);
-        syncLogger.info({ userId }, 'Bootstrap: subscribed to Google webhook');
+        const sub = await watchGoogleCalendar(userId, 'primary', webhookUrl);
+        // Persist so /webhooks/google can recognise incoming notifications.
+        // Without this row the handler logs "Unknown Google webhook channel"
+        // for every event Google fires.
+        await db.webhookSubscription.create({
+          data: {
+            calendarId: calendar.id,
+            provider: 'GOOGLE',
+            channelId: sub.channelId,
+            resourceId: sub.resourceId,
+            webhookUrl,
+            clientState: userId,
+            expiresAt: sub.expiration,
+            status: 'ACTIVE',
+          },
+        });
+        syncLogger.info({ userId, channelId: sub.channelId }, 'Bootstrap: subscribed to Google webhook');
       }
     } catch (err) {
-      syncLogger.error({ userId, err }, 'Bootstrap: failed to subscribe Google webhook');
+      syncLogger.error({ userId, err: (err as Error).message }, 'Bootstrap: failed to subscribe Google webhook');
     }
   } catch (err) {
-    syncLogger.error({ userId, err }, 'Bootstrap Google failed entirely');
+    syncLogger.error({ userId, err: (err as Error).message, stack: (err as Error).stack }, 'Bootstrap Google failed entirely');
   }
 }
 
@@ -192,13 +207,25 @@ export async function bootstrapMicrosoftConnection(userId: string): Promise<void
     try {
       const webhookUrl = config.webhook.microsoftUrl || `${config.webhook.baseUrl}/webhooks/microsoft`;
       if (webhookUrl && !webhookUrl.includes('your-domain.com')) {
-        await createMicrosoftSubscription(userId, externalCalendarId, webhookUrl);
-        syncLogger.info({ userId }, 'Bootstrap: subscribed to Microsoft webhook');
+        const sub = await createMicrosoftSubscription(userId, externalCalendarId, webhookUrl);
+        await db.webhookSubscription.create({
+          data: {
+            calendarId: calendar.id,
+            provider: 'MICROSOFT',
+            channelId: sub.subscriptionId, // MS subscription id stored as channelId
+            resourceId: externalCalendarId,
+            webhookUrl,
+            clientState: userId,
+            expiresAt: sub.expiration,
+            status: 'ACTIVE',
+          },
+        });
+        syncLogger.info({ userId, subscriptionId: sub.subscriptionId }, 'Bootstrap: subscribed to Microsoft webhook');
       }
     } catch (err) {
-      syncLogger.error({ userId, err }, 'Bootstrap: failed to subscribe Microsoft webhook');
+      syncLogger.error({ userId, err: (err as Error).message }, 'Bootstrap: failed to subscribe Microsoft webhook');
     }
   } catch (err) {
-    syncLogger.error({ userId, err }, 'Bootstrap Microsoft failed entirely');
+    syncLogger.error({ userId, err: (err as Error).message, stack: (err as Error).stack }, 'Bootstrap Microsoft failed entirely');
   }
 }

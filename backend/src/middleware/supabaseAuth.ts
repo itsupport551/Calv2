@@ -111,16 +111,36 @@ export async function authenticateSupabase(req: Request, res: Response, next: Ne
     }
   }
   if (!user) {
-    user = await db.user.create({
-      data: {
-        email: sbUser.email || `${sbUser.id}@no-email.local`,
-        displayName: sbUser.user_metadata?.full_name || sbUser.email || 'New user',
-        role: 'USER',
-        supabaseUserId: sbUser.id,
-        isActive: true,
-      },
-    });
-    authLogger.info({ userId: user.id, supabaseUserId: sbUser.id }, 'Provisioned local user from Supabase identity');
+    // Concurrent requests (e.g. dashboard mount firing /api/me + /api/me/events
+    // at the same time) can both reach here and race to create the same row.
+    // Use upsert keyed on supabaseUserId to make it idempotent, and catch
+    // any residual unique-violation (e.g. email collision with a pre-existing
+    // row created before Supabase Auth was introduced) by falling back to
+    // the email-keyed update.
+    try {
+      user = await db.user.upsert({
+        where: { supabaseUserId: sbUser.id },
+        create: {
+          email: sbUser.email || `${sbUser.id}@no-email.local`,
+          displayName: sbUser.user_metadata?.full_name || sbUser.email || 'New user',
+          role: 'USER',
+          supabaseUserId: sbUser.id,
+          isActive: true,
+        },
+        update: {}, // nothing to change if it now exists
+      });
+      authLogger.info({ userId: user.id, supabaseUserId: sbUser.id }, 'Provisioned local user from Supabase identity');
+    } catch (err: any) {
+      if (err?.code === 'P2002' && sbUser.email) {
+        // Another row already owns this email — link it to this supabase id.
+        user = await db.user.update({
+          where: { email: sbUser.email },
+          data: { supabaseUserId: sbUser.id },
+        });
+      } else {
+        throw err;
+      }
+    }
   }
 
   if (!user.isActive) {
