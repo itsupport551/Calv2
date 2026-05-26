@@ -9,7 +9,6 @@
 // - Throttle handling (429)
 // ============================================================
 
-import { ConfidentialClientApplication } from '@azure/msal-node';
 import { Client } from '@microsoft/microsoft-graph-client';
 import config from '../../config';
 import { syncLogger } from '../../utils/logger';
@@ -19,26 +18,7 @@ import getDatabase from '../../database/client';
 import { CanonicalEvent, CalendarProvider, EventStatus, EventVisibility, ShowAsStatus, AttendeeResponseStatus, FreeBusySlot } from '../../types';
 import { v4 as uuidv4 } from 'uuid';
 import { microsoftRecurrenceToCanonical, canonicalToMicrosoftRecurrence } from '../../sync/recurringEvents';
-
-// Lazy-init MSAL — empty MICROSOFT_CLIENT_SECRET at boot would otherwise
-// crash the whole process from this module's import.
-let _msalApp: ConfidentialClientApplication | null = null;
-function msalApp(): ConfidentialClientApplication {
-  if (_msalApp) return _msalApp;
-  if (!config.microsoft.clientId || !config.microsoft.clientSecret) {
-    throw new Error(
-      'Microsoft OAuth is not configured. Set MICROSOFT_CLIENT_ID and MICROSOFT_CLIENT_SECRET in your environment.'
-    );
-  }
-  _msalApp = new ConfidentialClientApplication({
-    auth: {
-      clientId: config.microsoft.clientId,
-      clientSecret: config.microsoft.clientSecret,
-      authority: config.microsoft.authority,
-    },
-  });
-  return _msalApp;
-}
+import { refreshAccessToken } from './oauth';
 
 /**
  * Get an authenticated Microsoft Graph client for a user.
@@ -54,33 +34,33 @@ export async function getMicrosoftGraphClient(userId: string): Promise<Client> {
     },
   });
 
-  if (!user?.microsoftAccessToken || !user?.microsoftRefreshToken) {
+  if (!user?.microsoftAccessToken) {
     throw new Error('Microsoft account not connected');
   }
 
   let accessToken = decrypt(user.microsoftAccessToken);
 
-  // Refresh if expired
-  if (user.microsoftTokenExpiresAt && new Date() >= user.microsoftTokenExpiresAt) {
+  // Refresh if expired (and we have a refresh token to do so with).
+  const expired =
+    user.microsoftTokenExpiresAt && new Date() >= user.microsoftTokenExpiresAt;
+  if (expired && user.microsoftRefreshToken) {
     syncLogger.info({ userId }, 'Refreshing expired Microsoft token');
     try {
-      const result = await msalApp().acquireTokenByRefreshToken({
-        refreshToken: decrypt(user.microsoftRefreshToken),
-        scopes: [...config.microsoft.scopes],
+      const tokens = await refreshAccessToken(decrypt(user.microsoftRefreshToken));
+      accessToken = tokens.accessToken;
+      await db.user.update({
+        where: { id: userId },
+        data: {
+          microsoftAccessToken: encrypt(tokens.accessToken),
+          // MS may rotate the refresh token; persist the new one if given.
+          microsoftRefreshToken: tokens.refreshToken
+            ? encrypt(tokens.refreshToken)
+            : user.microsoftRefreshToken,
+          microsoftTokenExpiresAt: tokens.expiresAt,
+        },
       });
-
-      if (result) {
-        accessToken = result.accessToken;
-        await db.user.update({
-          where: { id: userId },
-          data: {
-            microsoftAccessToken: encrypt(result.accessToken),
-            microsoftTokenExpiresAt: result.expiresOn || new Date(Date.now() + 3600000),
-          },
-        });
-      }
     } catch (error) {
-      syncLogger.error({ userId, error }, 'Failed to refresh Microsoft token');
+      syncLogger.error({ userId, error: (error as Error).message }, 'Failed to refresh Microsoft token');
       throw new Error('Microsoft token refresh failed — user needs to re-authenticate');
     }
   }

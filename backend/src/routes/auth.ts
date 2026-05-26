@@ -22,8 +22,8 @@
 
 import { Router, Request, Response } from 'express';
 import { OAuth2Client } from 'google-auth-library';
-import { ConfidentialClientApplication } from '@azure/msal-node';
 import jwt from 'jsonwebtoken';
+import { buildMicrosoftAuthUrl, exchangeCodeForTokens } from '../connectors/microsoft/oauth';
 import config from '../config';
 import getDatabase from '../database/client';
 import { encrypt } from '../crypto/encryption';
@@ -139,38 +139,19 @@ router.get('/google/callback', authRateLimiter, async (req: Request, res: Respon
 });
 
 // ---- Microsoft ----
+// Direct OAuth (no MSAL) — see connectors/microsoft/oauth.ts for why.
 
-let _msalApp: ConfidentialClientApplication | null = null;
-function getMsalApp(): ConfidentialClientApplication {
-  if (_msalApp) return _msalApp;
+router.get('/microsoft/url', authenticateSupabase, (req: Request, res: Response) => {
   if (!config.microsoft.clientId || !config.microsoft.clientSecret) {
-    throw new Error('Microsoft OAuth is not configured. Set MICROSOFT_CLIENT_ID and MICROSOFT_CLIENT_SECRET.');
-  }
-  _msalApp = new ConfidentialClientApplication({
-    auth: {
-      clientId: config.microsoft.clientId,
-      clientSecret: config.microsoft.clientSecret,
-      authority: config.microsoft.authority,
-    },
-  });
-  return _msalApp;
-}
-
-router.get('/microsoft/url', authenticateSupabase, async (req: Request, res: Response) => {
-  try {
-    const state = signOAuthState(req.authUser!.id, 'microsoft');
-    const url = await getMsalApp().getAuthCodeUrl({
-      scopes: [...config.microsoft.scopes],
-      redirectUri: config.microsoft.redirectUri,
-      state,
-    });
-    res.json({ success: true, data: { url } });
-  } catch (err) {
     res.status(503).json({
       success: false,
-      error: { code: 'MS_NOT_CONFIGURED', message: (err as Error).message },
+      error: { code: 'MS_NOT_CONFIGURED', message: 'Microsoft OAuth is not configured. Set MICROSOFT_CLIENT_ID and MICROSOFT_CLIENT_SECRET.' },
     });
+    return;
   }
+  const state = signOAuthState(req.authUser!.id, 'microsoft');
+  const url = buildMicrosoftAuthUrl(state);
+  res.json({ success: true, data: { url } });
 });
 
 router.get('/microsoft/callback', authRateLimiter, async (req: Request, res: Response) => {
@@ -189,19 +170,18 @@ router.get('/microsoft/callback', authRateLimiter, async (req: Request, res: Res
       return;
     }
 
-    const result = await getMsalApp().acquireTokenByCode({
-      code,
-      scopes: [...config.microsoft.scopes],
-      redirectUri: config.microsoft.redirectUri,
-      state,
-    });
+    // Exchange code → tokens via direct POST to Microsoft Identity. This
+    // returns refresh_token explicitly (unlike MSAL which keeps it private),
+    // so getMicrosoftGraphClient can use it later to silently refresh.
+    const tokens = await exchangeCodeForTokens(code);
 
     const db = getDatabase();
     await db.user.update({
       where: { id: userId },
       data: {
-        microsoftAccessToken: encrypt(result.accessToken),
-        microsoftTokenExpiresAt: result.expiresOn || null,
+        microsoftAccessToken: encrypt(tokens.accessToken),
+        microsoftRefreshToken: tokens.refreshToken ? encrypt(tokens.refreshToken) : undefined,
+        microsoftTokenExpiresAt: tokens.expiresAt,
         microsoftConnected: true,
       },
     });
