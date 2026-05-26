@@ -1,5 +1,23 @@
 // ============================================================
-// Enterprise Calendar Sync — Auth Routes
+// Enterprise Calendar Sync — Calendar Connection Routes
+// ============================================================
+// Authentication itself is handled by Supabase Auth on the frontend.
+// These routes EXCLUSIVELY handle linking a calendar provider (Google
+// Calendar / Microsoft Graph) to the already-logged-in user.
+//
+// Flow:
+//   1. Frontend (already authenticated with Supabase) requests
+//      GET /auth/{provider}/url with the Supabase JWT in Authorization.
+//      Backend signs a short-lived `state` containing the user id and
+//      returns the OAuth consent URL.
+//   2. Browser navigates to the consent URL.
+//   3. Provider redirects to /auth/{provider}/callback?code=...&state=...
+//      Backend verifies the state, exchanges the code for tokens, and
+//      stores them encrypted against the user identified by state.uid.
+//   4. Browser is redirected back to the dashboard.
+//
+// No cookie is set, no JWT issued — login is handled separately by
+// Supabase.
 // ============================================================
 
 import { Router, Request, Response } from 'express';
@@ -9,153 +27,115 @@ import jwt from 'jsonwebtoken';
 import config from '../config';
 import getDatabase from '../database/client';
 import { encrypt } from '../crypto/encryption';
-import { generateJWT } from '../middleware/auth';
 import { logAuditEvent } from '../audit/logger';
 import { authLogger } from '../utils/logger';
-import { AuditAction, AuditResourceType, AuditSource, JwtPayload } from '../types';
+import { AuditAction, AuditResourceType, AuditSource } from '../types';
 import { authRateLimiter } from '../middleware/security';
+import { authenticateSupabase } from '../middleware/supabaseAuth';
 
-/**
- * If the request already carries a valid JWT cookie, return its user id.
- * Used by OAuth callbacks so that connecting a second provider links to
- * the existing logged-in account instead of creating a parallel user
- * (which used to happen when the user's Google and Microsoft emails differ).
- */
-function getExistingUserIdFromCookie(req: Request): string | null {
-  const token = req.cookies?.token;
-  if (!token) return null;
+const router = Router();
+
+interface OAuthStatePayload {
+  uid: string;
+  provider: 'google' | 'microsoft';
+  iat: number;
+  exp: number;
+}
+
+function signOAuthState(uid: string, provider: 'google' | 'microsoft'): string {
+  return jwt.sign({ uid, provider }, config.jwt.secret, { expiresIn: '10m' });
+}
+
+function verifyOAuthState(state: string, expectedProvider: 'google' | 'microsoft'): string | null {
   try {
-    const decoded = jwt.verify(token, config.jwt.secret) as JwtPayload;
-    return decoded.sub || null;
+    const decoded = jwt.verify(state, config.jwt.secret) as OAuthStatePayload;
+    if (decoded.provider !== expectedProvider) return null;
+    return decoded.uid;
   } catch {
     return null;
   }
 }
 
-const router = Router();
-
-// ---- Google OAuth ----
+// ---- Google ----
 
 const googleOAuth = new OAuth2Client(
   config.google.clientId,
   config.google.clientSecret,
-  config.google.redirectUri
+  config.google.redirectUri,
 );
 
-/** Redirect user to Google consent screen */
-router.get('/google', authRateLimiter, (_req: Request, res: Response) => {
-  const authUrl = googleOAuth.generateAuthUrl({
+/** Authenticated frontend asks for the consent URL with a signed state. */
+router.get('/google/url', authenticateSupabase, (req: Request, res: Response) => {
+  if (!config.google.clientId) {
+    res.status(503).json({ success: false, error: { code: 'GOOGLE_NOT_CONFIGURED', message: 'Google OAuth credentials are not set on the server' } });
+    return;
+  }
+  const state = signOAuthState(req.authUser!.id, 'google');
+  const url = googleOAuth.generateAuthUrl({
     access_type: 'offline',
     prompt: 'consent',
     scope: [...config.google.scopes],
+    state,
   });
-  res.redirect(authUrl);
+  res.json({ success: true, data: { url } });
 });
 
-/** Handle Google OAuth callback */
-router.get('/google/callback', async (req: Request, res: Response) => {
+/** Google redirects here with code + state. We link Google to the user. */
+router.get('/google/callback', authRateLimiter, async (req: Request, res: Response) => {
+  const dashboard = config.adminDashboard.url;
   try {
-    const { code } = req.query;
-    if (!code || typeof code !== 'string') {
-      res.status(400).json({ success: false, error: { code: 'MISSING_CODE', message: 'Authorization code missing' } });
+    const code = req.query.code as string | undefined;
+    const state = req.query.state as string | undefined;
+    if (!code || !state) {
+      res.redirect(`${dashboard}/dashboard?connect_error=missing_code_or_state`);
+      return;
+    }
+
+    const userId = verifyOAuthState(state, 'google');
+    if (!userId) {
+      res.redirect(`${dashboard}/dashboard?connect_error=invalid_state`);
       return;
     }
 
     const { tokens } = await googleOAuth.getToken(code);
-    googleOAuth.setCredentials(tokens);
-
-    // Get user info
-    const oauth2 = (await import('googleapis')).google.oauth2({ version: 'v2', auth: googleOAuth });
-    const userInfo = await oauth2.userinfo.get();
-    const email = userInfo.data.email!;
-    const name = userInfo.data.name || email;
 
     const db = getDatabase();
+    await db.user.update({
+      where: { id: userId },
+      data: {
+        googleAccessToken: encrypt(tokens.access_token!),
+        googleRefreshToken: tokens.refresh_token ? encrypt(tokens.refresh_token) : undefined,
+        googleTokenExpiresAt: tokens.expiry_date ? new Date(tokens.expiry_date) : null,
+        googleConnected: true,
+      },
+    });
 
-    // If user is already logged in (has a valid JWT cookie), LINK the new
-    // Google connection to that existing account instead of creating /
-    // upserting a separate user by email. This lets a single user connect
-    // both their Google AND Microsoft accounts even when the emails differ.
-    const existingUserId = getExistingUserIdFromCookie(req);
-
-    const googleData = {
-      googleAccessToken: encrypt(tokens.access_token!),
-      googleRefreshToken: tokens.refresh_token ? encrypt(tokens.refresh_token) : undefined,
-      googleTokenExpiresAt: tokens.expiry_date ? new Date(tokens.expiry_date) : null,
-      googleConnected: true,
-    };
-
-    let user;
-    if (existingUserId) {
-      user = await db.user.update({
-        where: { id: existingUserId },
-        data: googleData,
-      });
-    } else {
-      user = await db.user.upsert({
-        where: { email },
-        update: { ...googleData, displayName: name },
-        create: {
-          email,
-          displayName: name,
-          role: 'USER',
-          ...googleData,
-          googleRefreshToken: encrypt(tokens.refresh_token || ''),
-          isActive: true,
-        },
-      });
-    }
-
-    // Generate JWT
-    const jwt = generateJWT({ id: user.id, email: user.email, role: user.role });
-
-    // Audit log
     await logAuditEvent({
-      userId: user.id,
+      userId,
       action: AuditAction.LOGIN_SUCCESS,
       resourceType: AuditResourceType.USER,
-      resourceId: user.id,
-      newValue: { provider: 'google', email },
+      resourceId: userId,
+      newValue: { provider: 'google', linked: true },
       ipAddress: req.ip || '0.0.0.0',
       userAgent: req.headers['user-agent'] || '',
       source: AuditSource.USER,
     });
 
-    authLogger.info({ userId: user.id, email }, 'Google OAuth login successful');
-
-    // Set secure cookie and redirect to dashboard
-    // Cookie must be SameSite=None + Secure so the browser sends it on
-    // cross-origin fetches from the Vercel frontend back to the Railway
-    // backend. `lax` would silently block all our /api/* calls.
-    // In local dev (NODE_ENV=development) Secure is dropped so the cookie
-    // works over plain http://localhost.
-    res.cookie('token', jwt, {
-      httpOnly: true,
-      secure: config.isProd,
-      sameSite: config.isProd ? 'none' : 'lax',
-      maxAge: 24 * 60 * 60 * 1000,
-    });
-
-    res.redirect(`${config.adminDashboard.url}/dashboard?login=success&provider=google`);
+    authLogger.info({ userId }, 'Google calendar linked');
+    res.redirect(`${dashboard}/dashboard?connected=google`);
   } catch (error) {
     authLogger.error({ error }, 'Google OAuth callback failed');
-    res.redirect(`${config.adminDashboard.url}/login?error=google_auth_failed`);
+    res.redirect(`${dashboard}/dashboard?connect_error=google_oauth_failed`);
   }
 });
 
-// ---- Microsoft OAuth ----
+// ---- Microsoft ----
 
-// Lazy-init the MSAL client so an empty MICROSOFT_CLIENT_SECRET at boot
-// (e.g. before the operator has filled in OAuth creds on Railway) doesn't
-// crash the entire process at module-import time. The client is created
-// on first request; until then the rest of the app boots fine.
 let _msalApp: ConfidentialClientApplication | null = null;
 function getMsalApp(): ConfidentialClientApplication {
   if (_msalApp) return _msalApp;
   if (!config.microsoft.clientId || !config.microsoft.clientSecret) {
-    throw new Error(
-      'Microsoft OAuth is not configured. Set MICROSOFT_CLIENT_ID and MICROSOFT_CLIENT_SECRET in your environment.'
-    );
+    throw new Error('Microsoft OAuth is not configured. Set MICROSOFT_CLIENT_ID and MICROSOFT_CLIENT_SECRET.');
   }
   _msalApp = new ConfidentialClientApplication({
     auth: {
@@ -167,28 +147,36 @@ function getMsalApp(): ConfidentialClientApplication {
   return _msalApp;
 }
 
-/** Redirect user to Microsoft consent screen */
-router.get('/microsoft', authRateLimiter, async (_req: Request, res: Response) => {
+router.get('/microsoft/url', authenticateSupabase, async (req: Request, res: Response) => {
   try {
-    const authUrl = await getMsalApp().getAuthCodeUrl({
+    const state = signOAuthState(req.authUser!.id, 'microsoft');
+    const url = await getMsalApp().getAuthCodeUrl({
       scopes: [...config.microsoft.scopes],
       redirectUri: config.microsoft.redirectUri,
+      state,
     });
-    res.redirect(authUrl);
+    res.json({ success: true, data: { url } });
   } catch (err) {
     res.status(503).json({
       success: false,
-      error: { code: 'MS_OAUTH_NOT_CONFIGURED', message: (err as Error).message },
+      error: { code: 'MS_NOT_CONFIGURED', message: (err as Error).message },
     });
   }
 });
 
-/** Handle Microsoft OAuth callback */
-router.get('/microsoft/callback', async (req: Request, res: Response) => {
+router.get('/microsoft/callback', authRateLimiter, async (req: Request, res: Response) => {
+  const dashboard = config.adminDashboard.url;
   try {
-    const { code } = req.query;
-    if (!code || typeof code !== 'string') {
-      res.status(400).json({ success: false, error: { code: 'MISSING_CODE', message: 'Authorization code missing' } });
+    const code = req.query.code as string | undefined;
+    const state = req.query.state as string | undefined;
+    if (!code || !state) {
+      res.redirect(`${dashboard}/dashboard?connect_error=missing_code_or_state`);
+      return;
+    }
+
+    const userId = verifyOAuthState(state, 'microsoft');
+    if (!userId) {
+      res.redirect(`${dashboard}/dashboard?connect_error=invalid_state`);
       return;
     }
 
@@ -196,114 +184,36 @@ router.get('/microsoft/callback', async (req: Request, res: Response) => {
       code,
       scopes: [...config.microsoft.scopes],
       redirectUri: config.microsoft.redirectUri,
+      state,
     });
 
-    // Get user info from token claims
-    const email = result.account?.username || '';
-    const name = result.account?.name || email;
-
     const db = getDatabase();
-
-    // Link to existing logged-in user if there's a valid JWT cookie —
-    // so a user can connect both Google + Microsoft to one account.
-    const existingUserId = getExistingUserIdFromCookie(req);
-
-    const msData = {
-      microsoftAccessToken: encrypt(result.accessToken),
-      microsoftTokenExpiresAt: result.expiresOn || null,
-      microsoftConnected: true,
-    };
-
-    let user;
-    if (existingUserId) {
-      user = await db.user.update({
-        where: { id: existingUserId },
-        data: msData,
-      });
-    } else {
-      user = await db.user.upsert({
-        where: { email },
-        update: { ...msData, displayName: name },
-        create: {
-          email,
-          displayName: name,
-          role: 'USER',
-          ...msData,
-          isActive: true,
-        },
-      });
-    }
-
-    const jwt = generateJWT({ id: user.id, email: user.email, role: user.role });
+    await db.user.update({
+      where: { id: userId },
+      data: {
+        microsoftAccessToken: encrypt(result.accessToken),
+        microsoftTokenExpiresAt: result.expiresOn || null,
+        microsoftConnected: true,
+      },
+    });
 
     await logAuditEvent({
-      userId: user.id,
+      userId,
       action: AuditAction.LOGIN_SUCCESS,
       resourceType: AuditResourceType.USER,
-      resourceId: user.id,
-      newValue: { provider: 'microsoft', email },
+      resourceId: userId,
+      newValue: { provider: 'microsoft', linked: true },
       ipAddress: req.ip || '0.0.0.0',
       userAgent: req.headers['user-agent'] || '',
       source: AuditSource.USER,
     });
 
-    authLogger.info({ userId: user.id, email }, 'Microsoft OAuth login successful');
-
-    // Cookie must be SameSite=None + Secure so the browser sends it on
-    // cross-origin fetches from the Vercel frontend back to the Railway
-    // backend. `lax` would silently block all our /api/* calls.
-    // In local dev (NODE_ENV=development) Secure is dropped so the cookie
-    // works over plain http://localhost.
-    res.cookie('token', jwt, {
-      httpOnly: true,
-      secure: config.isProd,
-      sameSite: config.isProd ? 'none' : 'lax',
-      maxAge: 24 * 60 * 60 * 1000,
-    });
-
-    res.redirect(`${config.adminDashboard.url}/dashboard?login=success&provider=microsoft`);
+    authLogger.info({ userId }, 'Microsoft calendar linked');
+    res.redirect(`${dashboard}/dashboard?connected=microsoft`);
   } catch (error) {
     authLogger.error({ error }, 'Microsoft OAuth callback failed');
-    res.redirect(`${config.adminDashboard.url}/login?error=microsoft_auth_failed`);
+    res.redirect(`${dashboard}/dashboard?connect_error=microsoft_oauth_failed`);
   }
-});
-
-// ---- Session Management ----
-
-router.get('/session', async (req: Request, res: Response) => {
-  try {
-    const token = req.cookies?.token;
-    if (!token) {
-      res.json({ success: true, data: { authenticated: false } });
-      return;
-    }
-
-    const jwt = await import('jsonwebtoken');
-    const decoded = jwt.default.verify(token, config.jwt.secret) as any;
-    const db = getDatabase();
-    const user = await db.user.findUnique({
-      where: { id: decoded.sub },
-      select: {
-        id: true, email: true, displayName: true, role: true,
-        googleConnected: true, microsoftConnected: true,
-        lastSyncAt: true, isActive: true,
-      },
-    });
-
-    if (!user || !user.isActive) {
-      res.json({ success: true, data: { authenticated: false } });
-      return;
-    }
-
-    res.json({ success: true, data: { authenticated: true, user } });
-  } catch {
-    res.json({ success: true, data: { authenticated: false } });
-  }
-});
-
-router.post('/logout', (req: Request, res: Response) => {
-  res.clearCookie('token');
-  res.json({ success: true, data: { message: 'Logged out successfully' } });
 });
 
 export default router;

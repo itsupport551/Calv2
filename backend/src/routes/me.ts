@@ -9,18 +9,18 @@
 // ============================================================
 
 import { Router, Request, Response } from 'express';
-import { authenticateToken } from '../middleware/auth';
+import { authenticateSupabase } from '../middleware/supabaseAuth';
 import getDatabase from '../database/client';
 
 const router = Router();
 
-router.use(authenticateToken);
+router.use(authenticateSupabase);
 
 /** Current user profile + connection status */
 router.get('/', async (req: Request, res: Response) => {
   const db = getDatabase();
   const user = await db.user.findUnique({
-    where: { id: req.user!.sub },
+    where: { id: req.authUser!.id },
     select: {
       id: true,
       email: true,
@@ -43,7 +43,7 @@ router.get('/', async (req: Request, res: Response) => {
 /** Events visible to the current user (from any of their calendars) */
 router.get('/events', async (req: Request, res: Response) => {
   const db = getDatabase();
-  const userId = req.user!.sub;
+  const userId = req.authUser!.id;
   const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
   const fromQuery = req.query.from as string | undefined;
   const toQuery = req.query.to as string | undefined;
@@ -91,7 +91,7 @@ router.get('/events', async (req: Request, res: Response) => {
 /** Unlink a connected provider */
 router.post('/disconnect/:provider', async (req: Request, res: Response) => {
   const db = getDatabase();
-  const userId = req.user!.sub;
+  const userId = req.authUser!.id;
   const provider = req.params.provider;
 
   if (provider !== 'google' && provider !== 'microsoft') {

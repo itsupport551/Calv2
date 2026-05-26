@@ -3,16 +3,16 @@
 // ============================================================
 
 import { Router, Request, Response } from 'express';
-import { authenticateToken, requireRole } from '../middleware/auth';
+import { authenticateSupabase, requireSupabaseRole } from '../middleware/supabaseAuth';
 import getDatabase from '../database/client';
 import { queryAuditLogs } from '../audit/logger';
 import { UserRole } from '../types';
 
 const router = Router();
 
-// All admin routes require authentication + ADMIN role
-router.use(authenticateToken);
-router.use(requireRole(UserRole.ADMIN));
+// All admin routes require Supabase-authenticated session + ADMIN role
+router.use(authenticateSupabase);
+router.use(requireSupabaseRole(UserRole.ADMIN));
 
 /** Get system dashboard stats */
 router.get('/dashboard/stats', async (_req: Request, res: Response) => {

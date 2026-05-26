@@ -27,6 +27,10 @@ model User {
   email                       String    @unique @db.VarChar(255)
   displayName                 String    @db.VarChar(255)
   role                        UserRole  @default(USER)
+
+  // Supabase Auth user id (sub claim). Set when a user signs up via the
+  // frontend's Supabase Auth flow. Decouples login from calendar OAuth.
+  supabaseUserId              String?   @unique @db.Text
   
   // OAuth tokens — AES-256-GCM encrypted at app layer
   googleAccessToken           String?   @db.Text

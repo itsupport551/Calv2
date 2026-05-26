@@ -63,6 +63,15 @@ export const config = {
     url: requireEnv('DATABASE_URL'),
   },
 
+  // ---- Supabase Auth ----
+  // The frontend uses Supabase for email/password login. Backend uses
+  // the URL + anon key to verify JWTs that arrive in the Authorization
+  // header on /api/* requests.
+  supabase: {
+    url: optionalEnv('SUPABASE_URL', ''),
+    anonKey: optionalEnv('SUPABASE_ANON_KEY', ''),
+  },
+
   // ---- Encryption ----
   encryption: {
     key: requireEnv('ENCRYPTION_KEY'),

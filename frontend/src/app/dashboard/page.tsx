@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { supabase, apiFetch, API_BASE } from '../../lib/supabase';
 
 interface DashboardStats {
   users: { total: number; active: number };
@@ -9,24 +10,73 @@ interface DashboardStats {
   conflicts: { today: number };
 }
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4400';
+interface MeUser {
+  id: string;
+  email: string;
+  displayName: string;
+  role: 'ADMIN' | 'USER' | 'VIEWER';
+  googleConnected: boolean;
+  microsoftConnected: boolean;
+  lastSyncAt: string | null;
+}
+
+interface MyEvent {
+  id: string;
+  title: string;
+  startTime: string;
+  endTime: string;
+  isAllDay: boolean;
+  location: string;
+  organizerEmail: string;
+  sourcePlatform: 'GOOGLE' | 'MICROSOFT';
+  mirrorPlatform: 'GOOGLE' | 'MICROSOFT' | null;
+  syncState: string;
+  meetingLink: string;
+}
 
 export default function DashboardPage() {
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [activeTab, setActiveTab] = useState('mycalendar');
   const [loading, setLoading] = useState(true);
+  const [me, setMe] = useState<MeUser | null>(null);
+  const [authChecked, setAuthChecked] = useState(false);
 
+  // Gate the entire dashboard on a Supabase session. If there isn't one,
+  // bounce back to /. Also fetch /api/me once on mount so we know the
+  // user's role (used to hide admin-only tabs).
   useEffect(() => {
-    fetchStats();
-    const interval = setInterval(fetchStats, 30000); // Refresh every 30s
-    return () => clearInterval(interval);
+    let unsub: (() => void) | undefined;
+    supabase.auth.getSession().then(async ({ data }) => {
+      if (!data.session) {
+        window.location.href = '/';
+        return;
+      }
+      setAuthChecked(true);
+      try {
+        const j = await apiFetch<{ success: boolean; data: { user: MeUser } }>('/api/me');
+        if (j.success) setMe(j.data.user);
+      } catch {}
+    });
+    const { data: sub } = supabase.auth.onAuthStateChange((_e, session) => {
+      if (!session) window.location.href = '/';
+    });
+    unsub = () => sub.subscription.unsubscribe();
+    return unsub;
   }, []);
+
+  // Admin stats only fetched if user is admin — stops the 403 spam.
+  useEffect(() => {
+    if (!me) return;
+    if (me.role !== 'ADMIN') { setLoading(false); return; }
+    fetchStats();
+    const interval = setInterval(fetchStats, 30000);
+    return () => clearInterval(interval);
+  }, [me]);
 
   async function fetchStats() {
     try {
-      const res = await fetch(`${API_BASE}/api/admin/dashboard/stats`, { credentials: 'include' });
-      const data = await res.json();
-      if (data.success) setStats(data.data);
+      const j = await apiFetch<{ success: boolean; data: DashboardStats }>('/api/admin/dashboard/stats');
+      if (j.success) setStats(j.data);
     } catch (error) {
       console.error('Failed to fetch stats:', error);
     } finally {
@@ -34,16 +84,27 @@ export default function DashboardPage() {
     }
   }
 
-  const navItems = [
-    { id: 'mycalendar', icon: '📅', label: 'My Calendar' },
-    { id: 'overview', icon: '📊', label: 'Overview' },
-    { id: 'sync', icon: '🔄', label: 'Sync Monitor' },
-    { id: 'users', icon: '👥', label: 'Users' },
-    { id: 'conflicts', icon: '⚠️', label: 'Conflicts' },
-    { id: 'audit', icon: '📋', label: 'Audit Logs' },
-    { id: 'webhooks', icon: '🔗', label: 'Webhooks' },
-    { id: 'security', icon: '🛡️', label: 'Security' },
+  async function handleLogout() {
+    await supabase.auth.signOut();
+    window.location.href = '/';
+  }
+
+  const isAdmin = me?.role === 'ADMIN';
+  const allNav = [
+    { id: 'mycalendar', icon: '📅', label: 'My Calendar', adminOnly: false },
+    { id: 'overview', icon: '📊', label: 'Overview', adminOnly: true },
+    { id: 'sync', icon: '🔄', label: 'Sync Monitor', adminOnly: true },
+    { id: 'users', icon: '👥', label: 'Users', adminOnly: true },
+    { id: 'conflicts', icon: '⚠️', label: 'Conflicts', adminOnly: true },
+    { id: 'audit', icon: '📋', label: 'Audit Logs', adminOnly: true },
+    { id: 'webhooks', icon: '🔗', label: 'Webhooks', adminOnly: true },
+    { id: 'security', icon: '🛡️', label: 'Security', adminOnly: true },
   ];
+  const navItems = allNav.filter(n => !n.adminOnly || isAdmin);
+
+  if (!authChecked) {
+    return <div style={{ padding: 40, color: '#888' }}>Loading…</div>;
+  }
 
   return (
     <div className="app-layout">
@@ -69,7 +130,13 @@ export default function DashboardPage() {
           ))}
         </nav>
         <div style={{ borderTop: '1px solid var(--border)', paddingTop: '16px', marginTop: '16px' }}>
-          <button className="nav-item" onClick={() => window.location.href = '/'}>
+          {me && (
+            <div style={{ padding: '8px 12px', fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>
+              {me.email}
+              <div style={{ fontSize: 10, opacity: 0.7 }}>{me.role}</div>
+            </div>
+          )}
+          <button className="nav-item" onClick={handleLogout}>
             <span className="nav-item-icon">🚪</span>
             <span>Logout</span>
           </button>
@@ -272,8 +339,7 @@ export default function DashboardPage() {
 function SyncMonitorPanel() {
   const [transactions, setTransactions] = useState<any[]>([]);
   useEffect(() => {
-    fetch(`${API_BASE}/api/admin/sync/transactions?limit=50`, { credentials: 'include' })
-      .then(r => r.json()).then(d => d.success && setTransactions(d.data.transactions));
+    apiFetch('/api/admin/sync/transactions?limit=50').then(d => d.success && setTransactions(d.data.transactions));
   }, []);
 
   return (
@@ -318,20 +384,16 @@ function UsersPanel() {
   const [updatingId, setUpdatingId] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch(`${API_BASE}/api/admin/users?limit=100`, { credentials: 'include' })
-      .then(r => r.json()).then(d => d.success && setUsers(d.data.users));
+    apiFetch('/api/admin/users?limit=100').then(d => d.success && setUsers(d.data.users));
   }, []);
 
   async function changeEmailProvider(userId: string, provider: string) {
     setUpdatingId(userId);
     try {
-      const res = await fetch(`${API_BASE}/api/admin/users/${userId}/email-provider`, {
+      const data = await apiFetch(`/api/admin/users/${userId}/email-provider`, {
         method: 'PATCH',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ emailProvider: provider }),
       });
-      const data = await res.json();
       if (data.success) {
         setUsers(prev => prev.map(u => u.id === userId ? { ...u, emailProvider: provider } : u));
       }
@@ -393,8 +455,7 @@ function UsersPanel() {
 function ConflictsPanel() {
   const [conflicts, setConflicts] = useState<any[]>([]);
   useEffect(() => {
-    fetch(`${API_BASE}/api/admin/conflicts`, { credentials: 'include' })
-      .then(r => r.json()).then(d => d.success && setConflicts(d.data.conflicts));
+    apiFetch('/api/admin/conflicts').then(d => d.success && setConflicts(d.data.conflicts));
   }, []);
 
   return (
@@ -426,8 +487,7 @@ function ConflictsPanel() {
 function AuditPanel() {
   const [logs, setLogs] = useState<any[]>([]);
   useEffect(() => {
-    fetch(`${API_BASE}/api/admin/audit-logs?limit=100`, { credentials: 'include' })
-      .then(r => r.json()).then(d => d.success && setLogs(d.data.logs));
+    apiFetch('/api/admin/audit-logs?limit=100').then(d => d.success && setLogs(d.data.logs));
   }, []);
 
   return (
@@ -463,8 +523,7 @@ function AuditPanel() {
 function WebhooksPanel() {
   const [subs, setSubs] = useState<any[]>([]);
   useEffect(() => {
-    fetch(`${API_BASE}/api/admin/webhooks`, { credentials: 'include' })
-      .then(r => r.json()).then(d => d.success && setSubs(d.data.subscriptions));
+    apiFetch('/api/admin/webhooks').then(d => d.success && setSubs(d.data.subscriptions));
   }, []);
 
   return (
@@ -495,8 +554,7 @@ function WebhooksPanel() {
 function SecurityPanel() {
   const [sec, setSec] = useState<any>(null);
   useEffect(() => {
-    fetch(`${API_BASE}/api/admin/security`, { credentials: 'include' })
-      .then(r => r.json()).then(d => d.success && setSec(d.data));
+    apiFetch('/api/admin/security').then(d => d.success && setSec(d.data));
   }, []);
 
   return (
@@ -563,29 +621,6 @@ function SecurityPanel() {
 
 // ---- My Calendar — personal panel with connect buttons + events ----
 
-interface MeUser {
-  id: string;
-  email: string;
-  displayName: string;
-  googleConnected: boolean;
-  microsoftConnected: boolean;
-  lastSyncAt: string | null;
-}
-
-interface MyEvent {
-  id: string;
-  title: string;
-  startTime: string;
-  endTime: string;
-  isAllDay: boolean;
-  location: string;
-  organizerEmail: string;
-  sourcePlatform: 'GOOGLE' | 'MICROSOFT';
-  mirrorPlatform: 'GOOGLE' | 'MICROSOFT' | null;
-  syncState: string;
-  meetingLink: string;
-}
-
 function MyCalendarPanel() {
   const [me, setMe] = useState<MeUser | null>(null);
   const [events, setEvents] = useState<MyEvent[]>([]);
@@ -599,12 +634,10 @@ function MyCalendarPanel() {
   async function loadAll() {
     setLoading(true);
     try {
-      const [meRes, evRes] = await Promise.all([
-        fetch(`${API_BASE}/api/me`, { credentials: 'include' }),
-        fetch(`${API_BASE}/api/me/events?limit=100`, { credentials: 'include' }),
+      const [meData, evData] = await Promise.all([
+        apiFetch('/api/me'),
+        apiFetch('/api/me/events?limit=100'),
       ]);
-      const meData = await meRes.json();
-      const evData = await evRes.json();
       if (meData.success) setMe(meData.data.user);
       if (evData.success) setEvents(evData.data.events);
     } catch (err) {
@@ -618,16 +651,34 @@ function MyCalendarPanel() {
     if (!confirm(`Disconnect ${provider}? Your stored events stay; sync will stop.`)) return;
     setBusyProvider(provider);
     try {
-      await fetch(`${API_BASE}/api/me/disconnect/${provider}`, { method: 'POST', credentials: 'include' });
+      await apiFetch(`/api/me/disconnect/${provider}`, { method: 'POST' });
       await loadAll();
     } finally {
       setBusyProvider(null);
     }
   }
 
-  const connect = (provider: 'google' | 'microsoft') => {
-    window.location.href = `${API_BASE}/auth/${provider}`;
-  };
+  // Calendar connect = ask backend for a signed OAuth URL (it embeds our
+  // user id in `state`), then navigate the browser to the provider's
+  // consent screen. The callback links the new provider to our user
+  // without ever needing a cross-domain cookie.
+  async function connect(provider: 'google' | 'microsoft') {
+    setBusyProvider(provider);
+    try {
+      const j = await apiFetch<{ success: boolean; data: { url: string }; error?: { message: string } }>(
+        `/auth/${provider}/url`,
+      );
+      if (j.success && j.data?.url) {
+        window.location.href = j.data.url;
+      } else {
+        alert(j.error?.message || `Failed to start ${provider} OAuth`);
+        setBusyProvider(null);
+      }
+    } catch (err) {
+      alert((err as Error).message);
+      setBusyProvider(null);
+    }
+  }
 
   return (
     <>
