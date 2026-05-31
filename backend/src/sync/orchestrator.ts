@@ -271,7 +271,42 @@ async function processEventChange(
     return;
   }
 
-  // 5. Get target calendar
+  // 5. Get target calendar — but first short-circuit if the user has
+  // disconnected that provider. Without this we hammer the (now-empty)
+  // OAuth client and fail with "Google account not connected" /
+  // equivalent for MS, retry 5×, fail loudly. Disconnecting one
+  // provider is a totally normal state and should NOT cause sync
+  // errors when the other provider continues to fire webhooks.
+  const userConn = await db.user.findUnique({
+    where: { id: userId },
+    select: { googleConnected: true, microsoftConnected: true },
+  });
+  const targetConnected =
+    targetProvider === CalendarProvider.GOOGLE
+      ? !!userConn?.googleConnected
+      : !!userConn?.microsoftConnected;
+
+  if (!targetConnected) {
+    syncLogger.info(
+      { userId, targetProvider },
+      'Target provider not connected — recording locally without mirror',
+    );
+    // Save the event locally so the dashboard can still show it, but
+    // skip mirror creation. Set syncState=SKIPPED so the row tells the
+    // truth about its state.
+    await saveOrUpdateWithoutMirror(
+      userId,
+      calendar,
+      normalizedEvent,
+      sourcePlatformLit,
+      fingerprint,
+      idempotencyKey,
+      version,
+      existingEvent,
+    );
+    return;
+  }
+
   const targetCalendar = await db.calendar.findFirst({
     where: {
       userId,
@@ -283,6 +318,17 @@ async function processEventChange(
 
   if (!targetCalendar) {
     syncLogger.warn({ userId, targetProvider }, 'No target calendar found for sync');
+    // Same treatment: record locally, no mirror.
+    await saveOrUpdateWithoutMirror(
+      userId,
+      calendar,
+      normalizedEvent,
+      sourcePlatformLit,
+      fingerprint,
+      idempotencyKey,
+      version,
+      existingEvent,
+    );
     return;
   }
 
@@ -380,6 +426,62 @@ async function processEventChange(
     { userId, sourceEventId, mirrorEventId, action, direction },
     `✅ Sync ${action} completed`
   );
+}
+
+/**
+ * Upsert the canonical event row WITHOUT attempting to create or update
+ * a mirror on the other provider. Used when the user is disconnected
+ * from the target provider — we still want the dashboard to show the
+ * event locally, just flagged with syncState=SKIPPED.
+ */
+async function saveOrUpdateWithoutMirror(
+  userId: string,
+  calendar: any,
+  normalizedEvent: any,
+  sourcePlatform: 'GOOGLE' | 'MICROSOFT',
+  fingerprint: string,
+  idempotencyKey: string,
+  version: number,
+  existingEvent: any,
+): Promise<void> {
+  const db = getDatabase();
+  const globalEventUuid = existingEvent?.globalEventUuid || `csync-${uuidv4()}`;
+  const baseData = {
+    calendarId: calendar.id,
+    globalEventUuid,
+    sourcePlatform,
+    sourceEventId: normalizedEvent.sourceEventId!,
+    syncFingerprint: fingerprint,
+    idempotencyKey,
+    syncVersion: version,
+    title: encrypt(normalizedEvent.title || ''),
+    description: encrypt(normalizedEvent.description || ''),
+    startTime: normalizedEvent.startTime!,
+    endTime: normalizedEvent.endTime!,
+    timezone: normalizedEvent.timezone || 'UTC',
+    isAllDay: normalizedEvent.isAllDay || false,
+    location: encrypt(normalizedEvent.location || ''),
+    status: mapStatusToEnum(normalizedEvent.status),
+    visibility: mapVisibilityToEnum(normalizedEvent.visibility),
+    showAs: mapShowAsToEnum(normalizedEvent.showAs),
+    organizerEmail: normalizedEvent.organizerEmail || '',
+    organizerName: normalizedEvent.organizerName || '',
+    isOrganizer: normalizedEvent.isOrganizer || false,
+    attendees: JSON.stringify(normalizedEvent.attendees || []),
+    meetingLink: normalizedEvent.meetingLink || '',
+    syncState: 'SKIPPED' as const,
+    originPlatform: sourcePlatform,
+    lastModifiedAt: normalizedEvent.lastModifiedAt || new Date(),
+    lastModifiedBy: normalizedEvent.organizerEmail || 'system',
+    etag: normalizedEvent.etag || '',
+  };
+
+  if (existingEvent) {
+    await db.event.update({ where: { id: existingEvent.id }, data: baseData });
+  } else {
+    await db.event.create({ data: baseData });
+  }
+  syncLogger.info({ userId, sourceEventId: normalizedEvent.sourceEventId }, 'Saved event locally without mirror');
 }
 
 // ---- Helper Functions ----

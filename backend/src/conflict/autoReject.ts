@@ -33,30 +33,52 @@ export async function handleAutoRejection(
       return;
     }
     const mainConflict = conflictResult.conflicts[0];
-    await db.conflictLog.create({
-      data: {
-        eventId: mainConflict.existingEvent?.eventId && mainConflict.existingEvent.eventId !== 'incoming'
-          ? mainConflict.existingEvent.eventId
-          : uuidv4(),
-        userId,
-        conflictType: mainConflict?.type?.toUpperCase() as any || 'TIME_OVERLAP',
-        resolution: 'AUTO_REJECTED',
-        conflictingEventData: {
-          incomingTitle: event.title,
-          incomingStart: event.startTime,
-          incomingEnd: event.endTime,
-          incomingOrganizer: event.organizerEmail,
-          conflicts: conflictResult.conflicts.map(c => ({
-            existingTitle: c.existingEvent.title,
-            existingStart: c.existingEvent.startTime,
-            existingEnd: c.existingEvent.endTime,
-            overlapMinutes: c.overlapMinutes,
-          })),
-        },
-        rejectionReason: buildRejectionReason(conflictResult),
-        notificationSent: false,
-      },
-    });
+
+    // ConflictLog.eventId is a required FK to events(id). It must reference
+    // a REAL row — passing a fresh uuidv4() (as the old code did when no
+    // existingEvent id was available) violates the foreign key and 500s
+    // the whole auto-rejection. So: only log when we have a real existing
+    // event id, otherwise skip the DB row but still send the email + audit.
+    const existingEventId =
+      mainConflict.existingEvent?.eventId &&
+      mainConflict.existingEvent.eventId !== 'incoming'
+        ? mainConflict.existingEvent.eventId
+        : null;
+
+    if (existingEventId) {
+      // Verify the id actually exists — fingerprint/OOF detectors can
+      // produce synthetic ids that look like UUIDs but don't match a row.
+      const exists = await db.event.findUnique({
+        where: { id: existingEventId },
+        select: { id: true },
+      });
+      if (exists) {
+        await db.conflictLog.create({
+          data: {
+            eventId: existingEventId,
+            userId,
+            conflictType: mainConflict?.type?.toUpperCase() as any || 'TIME_OVERLAP',
+            resolution: 'AUTO_REJECTED',
+            conflictingEventData: {
+              incomingTitle: event.title,
+              incomingStart: event.startTime,
+              incomingEnd: event.endTime,
+              incomingOrganizer: event.organizerEmail,
+              conflicts: conflictResult.conflicts.map(c => ({
+                existingTitle: c.existingEvent.title,
+                existingStart: c.existingEvent.startTime,
+                existingEnd: c.existingEvent.endTime,
+                overlapMinutes: c.overlapMinutes,
+              })),
+            },
+            rejectionReason: buildRejectionReason(conflictResult),
+            notificationSent: false,
+          },
+        });
+      } else {
+        conflictLogger.info({ userId, existingEventId }, 'Conflict existingEvent id not found in DB — skipping ConflictLog row');
+      }
+    }
 
     // 2. Queue rejection email
     await queueNotification({

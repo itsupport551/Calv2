@@ -50,14 +50,11 @@ router.post('/google', async (req: Request, res: Response) => {
     });
 
     if (!subscription) {
-      webhookLogger.warn({ channelId }, 'Unknown Google webhook channel');
-      await logAuditEvent({
-        action: AuditAction.WEBHOOK_INVALID,
-        resourceType: AuditResourceType.WEBHOOK,
-        resourceId: channelId,
-        newValue: { reason: 'Unknown channel', provider: 'google' },
-        source: AuditSource.WEBHOOK,
-      });
+      // Common after a reconnect: user got a new channel id, but Google
+      // keeps firing the old channel until it expires (7 days). Not an
+      // error; logged at debug so it doesn't spam the deploy logs every
+      // 30 seconds for a week.
+      webhookLogger.debug({ channelId }, 'Webhook for unknown Google channel — discarding (stale)');
       return;
     }
 
