@@ -11,6 +11,8 @@ import { logAuditEvent } from '../audit/logger';
 import { queueNotification } from '../notifications/dispatcher';
 import { CanonicalEvent, ConflictDetectionResult, AuditAction, AuditResourceType, AuditSource } from '../types';
 import { v4 as uuidv4 } from 'uuid';
+import { declineGoogleEvent } from '../connectors/google/calendar';
+import { declineMicrosoftEvent } from '../connectors/microsoft/calendar';
 
 /**
  * Handle automatic rejection of a conflicting event.
@@ -75,7 +77,46 @@ export async function handleAutoRejection(
       },
     });
 
-    // 3. Audit log
+    // 3. Actually decline the invite on the source provider.
+    //    Only do this when the user is NOT the organizer (we don't
+    //    auto-decline our own events) AND the event has an external id
+    //    (a real provider-side event, not a synthetic conflict marker).
+    if (!event.isOrganizer && event.sourceEventId && calendar?.externalCalendarId) {
+      const reason = buildRejectionReason(conflictResult);
+      try {
+        if (calendar.provider === 'GOOGLE') {
+          // Look up the user's email — we need it to identify ourselves
+          // in the attendees list when declining.
+          const me = await db.user.findUnique({
+            where: { id: userId },
+            select: { email: true },
+          });
+          if (me?.email) {
+            await declineGoogleEvent(
+              userId,
+              calendar.externalCalendarId,
+              event.sourceEventId,
+              me.email,
+            );
+          }
+        } else if (calendar.provider === 'MICROSOFT') {
+          await declineMicrosoftEvent(userId, event.sourceEventId, reason);
+        }
+        conflictLogger.info(
+          { userId, sourceEventId: event.sourceEventId, provider: calendar.provider },
+          'Invite declined on source provider',
+        );
+      } catch (err) {
+        // Don't fail the whole auto-rejection if the provider call errors —
+        // the conflict log + email still go out so the user is informed.
+        conflictLogger.error(
+          { userId, sourceEventId: event.sourceEventId, err: (err as Error).message },
+          'Failed to decline invite on source provider',
+        );
+      }
+    }
+
+    // 4. Audit log
     await logAuditEvent({
       userId,
       action: AuditAction.INVITE_AUTO_REJECTED,

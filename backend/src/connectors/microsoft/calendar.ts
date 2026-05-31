@@ -142,6 +142,27 @@ export async function deleteMicrosoftEvent(userId: string, eventId: string): Pro
 }
 
 /**
+ * Decline an invite in Microsoft Outlook. Microsoft Graph has a
+ * dedicated /decline endpoint that fires the appropriate response to
+ * the organizer with `sendResponse: true`.
+ */
+export async function declineMicrosoftEvent(
+  userId: string,
+  eventId: string,
+  comment?: string,
+): Promise<void> {
+  const client = await getMicrosoftGraphClient(userId);
+
+  await withRetry(async () => {
+    await client.api(`/me/events/${eventId}/decline`).post({
+      comment: comment || 'Automatically declined — schedule conflict.',
+      sendResponse: true,
+    });
+    syncLogger.info({ userId, eventId }, 'Declined Microsoft invite');
+  }, 'declineMicrosoftEvent');
+}
+
+/**
  * Get free/busy schedule from Microsoft Graph.
  */
 export async function getMicrosoftFreeBusy(

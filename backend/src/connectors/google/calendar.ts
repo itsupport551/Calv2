@@ -212,6 +212,46 @@ export async function deleteGoogleEvent(
 }
 
 /**
+ * Decline an invite in Google Calendar. Finds the attendee whose email
+ * matches `userEmail` and sets responseStatus=declined. Google notifies
+ * the organizer via `sendUpdates=all`.
+ *
+ * We don't delete the event because the user might still want to see
+ * "this is the meeting I declined" — Google keeps declined events in
+ * the user's calendar by default, greyed out.
+ */
+export async function declineGoogleEvent(
+  userId: string,
+  calendarId: string,
+  eventId: string,
+  userEmail: string,
+): Promise<void> {
+  const auth = await getGoogleAuthClient(userId);
+  const calendar = google.calendar({ version: 'v3', auth });
+
+  await withRetry(async () => {
+    const { data: ev } = await calendar.events.get({ calendarId, eventId });
+    const attendees = (ev.attendees || []).map(a => {
+      if (a.email?.toLowerCase() === userEmail.toLowerCase()) {
+        return { ...a, responseStatus: 'declined' };
+      }
+      return a;
+    });
+    // If we weren't already listed as an attendee, add ourselves as declined.
+    if (!attendees.find(a => a.email?.toLowerCase() === userEmail.toLowerCase())) {
+      attendees.push({ email: userEmail, responseStatus: 'declined' });
+    }
+    await calendar.events.patch({
+      calendarId,
+      eventId,
+      sendUpdates: 'all',
+      requestBody: { attendees },
+    });
+    syncLogger.info({ userId, calendarId, eventId }, 'Declined Google invite');
+  }, 'declineGoogleEvent');
+}
+
+/**
  * Get free/busy information from Google Calendar.
  */
 export async function getGoogleFreeBusy(
