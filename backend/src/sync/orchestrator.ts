@@ -70,7 +70,10 @@ export async function processSyncWebhook(
       try {
         await processEventChange(userId, calendar, rawEvent, provider);
       } catch (error) {
-        syncLogger.error({ userId, eventId: rawEvent.id, error }, 'Failed to process event');
+        const err = error instanceof Error
+          ? { errMessage: error.message, errStack: error.stack, errName: error.name }
+          : { error };
+        syncLogger.error({ userId, eventId: rawEvent.id, ...err }, 'Failed to process event');
       }
     }
 

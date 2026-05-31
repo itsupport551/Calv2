@@ -82,42 +82,68 @@ export async function listGoogleEvents(
   const auth = await getGoogleAuthClient(userId);
   const calendar = google.calendar({ version: 'v3', auth });
 
-  return withRetry(async () => {
-    const params: calendar_v3.Params$Resource$Events$List = {
-      calendarId,
-      maxResults: 250,
-      singleEvents: true,
-      orderBy: 'updated',
-    };
+  // Google's API rules:
+  //  - `syncToken` cannot be combined with `orderBy` or any filter
+  //    (timeMin, timeMax, etc.) — it tracks "everything since last sync"
+  //    against the exact same query you used originally.
+  //  - If you pass a syncToken from an older query whose parameters no
+  //    longer match (e.g. we changed the time window), Google returns
+  //    HTTP 410 Gone. The fix is to re-bootstrap WITHOUT the token.
+  //
+  // We therefore: drop `orderBy` entirely (we don't need a stable sort,
+  // and it's incompatible with syncToken anyway); and on 410 we retry
+  // once from scratch.
 
-    if (syncToken) {
-      params.syncToken = syncToken;
-    } else {
-      // Initial sync window: now → +30 days. Matches what the dashboard
-      // shows. Past events are not synced (user requirement) and we don't
-      // pre-load the next year either — keeps the DB small and the first
-      // bootstrap fast.
-      const now = new Date();
-      params.timeMin = now.toISOString();
-      params.timeMax = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString();
-    }
+  async function doFetch(useSyncToken: string | null | undefined) {
+    return withRetry(async () => {
+      const params: calendar_v3.Params$Resource$Events$List = {
+        calendarId,
+        maxResults: 250,
+        singleEvents: true,
+      };
 
-    const allEvents: calendar_v3.Schema$Event[] = [];
-    let pageToken: string | undefined;
-    let nextSyncToken: string | null = null;
-
-    do {
-      const response = await calendar.events.list({ ...params, pageToken });
-      if (response.data.items) {
-        allEvents.push(...response.data.items);
+      if (useSyncToken) {
+        params.syncToken = useSyncToken;
+      } else {
+        // Initial / re-bootstrap window: now → +30 days. Matches what
+        // the dashboard shows. Past events are not synced and we don't
+        // pre-load far future either — small DB, fast first bootstrap.
+        const now = new Date();
+        params.timeMin = now.toISOString();
+        params.timeMax = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString();
       }
-      pageToken = response.data.nextPageToken || undefined;
-      nextSyncToken = response.data.nextSyncToken || null;
-    } while (pageToken);
 
-    syncLogger.info({ userId, calendarId, count: allEvents.length }, 'Listed Google events');
-    return { events: allEvents, nextSyncToken };
-  }, 'listGoogleEvents');
+      const allEvents: calendar_v3.Schema$Event[] = [];
+      let pageToken: string | undefined;
+      let nextSyncToken: string | null = null;
+
+      do {
+        const response = await calendar.events.list({ ...params, pageToken });
+        if (response.data.items) allEvents.push(...response.data.items);
+        pageToken = response.data.nextPageToken || undefined;
+        nextSyncToken = response.data.nextSyncToken || null;
+      } while (pageToken);
+
+      syncLogger.info({ userId, calendarId, count: allEvents.length }, 'Listed Google events');
+      return { events: allEvents, nextSyncToken };
+    }, 'listGoogleEvents');
+  }
+
+  try {
+    return await doFetch(syncToken);
+  } catch (err: any) {
+    const status = err?.code ?? err?.response?.status;
+    const msg = err?.message || '';
+    const isTokenInvalid =
+      status === 410 ||
+      /sync token/i.test(msg) ||
+      /fullSyncRequired/i.test(msg);
+    if (syncToken && isTokenInvalid) {
+      syncLogger.warn({ userId, calendarId }, 'Google sync token invalid — falling back to full window fetch');
+      return doFetch(null);
+    }
+    throw err;
+  }
 }
 
 /**
