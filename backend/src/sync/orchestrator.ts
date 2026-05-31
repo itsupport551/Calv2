@@ -143,22 +143,57 @@ async function processEventChange(
   }
 
   const sourceEventId = normalizedEvent.sourceEventId!;
+  const sourcePlatformLit = sourceProvider === CalendarProvider.GOOGLE ? 'GOOGLE' as const : 'MICROSOFT' as const;
 
-  // 2. LOOP PREVENTION — the most critical check
+  // 2. LOOP PREVENTION + MIRROR RECOGNITION
+  //
+  // The webhook can arrive for one of three rows:
+  //  (a) An event that originated in this provider (we have a row keyed
+  //      by sourcePlatform + sourceEventId).
+  //  (b) An event WE created in this provider as a mirror of an event
+  //      that originated in the other side. There's no row keyed by
+  //      (this-provider, sourceEventId) for it — instead the OTHER
+  //      side's row has mirrorEventId = sourceEventId.
+  //  (c) Nothing yet — truly new external event.
+  //
+  // Without case (b), Outlook's first webhook after we create a mirror
+  // would look like "new event from Outlook" and trigger another mirror
+  // back to Google → infinite loop. And a user deleting the mirror Y
+  // in Outlook would look like "unknown event was cancelled" → the
+  // original X in Google would survive.
   const fingerprint = generateSyncFingerprint(normalizedEvent);
-  const existingEvent = await db.event.findFirst({
+
+  let existingEvent = await db.event.findFirst({
     where: {
       calendarId: calendar.id,
       sourceEventId,
-      sourcePlatform: sourceProvider === CalendarProvider.GOOGLE ? 'GOOGLE' : 'MICROSOFT',
+      sourcePlatform: sourcePlatformLit,
     },
   });
 
+  // Case (b): this event IS our mirror — find the row on the other side
+  // whose mirrorEventId is what arrived as sourceEventId here.
+  let isMirrorOfRow: typeof existingEvent | null = null;
+  if (!existingEvent) {
+    isMirrorOfRow = await db.event.findFirst({
+      where: {
+        mirrorEventId: sourceEventId,
+        mirrorPlatform: sourcePlatformLit,
+      },
+    });
+    if (isMirrorOfRow) {
+      // First webhook after we created the mirror, or any update/delete
+      // that happened on the mirror side. Treat it as a change on the
+      // ORIGIN row.
+      existingEvent = isMirrorOfRow;
+    }
+  }
+
   if (existingEvent) {
-    // Check if this change was caused by our own sync
+    // Loop prevention: same content as our last write → skip.
     if (isSyncLoop(fingerprint, existingEvent.syncFingerprint)) {
       syncLogger.info(
-        { userId, sourceEventId, provider: sourceProvider },
+        { userId, sourceEventId, provider: sourceProvider, viaMirror: !!isMirrorOfRow },
         '🔄 LOOP PREVENTED — event fingerprint matches our sync, skipping'
       );
       await logAuditEvent({
@@ -169,20 +204,6 @@ async function processEventChange(
         source: AuditSource.SYSTEM,
       });
       return;
-    }
-
-    // Check if this event IS the mirror of a previously synced event (second loop prevention layer)
-    if (existingEvent.mirrorEventId) {
-      const mirrorCheck = await db.event.findFirst({
-        where: {
-          mirrorEventId: sourceEventId,
-          sourcePlatform: targetProvider === CalendarProvider.GOOGLE ? 'GOOGLE' : 'MICROSOFT',
-        },
-      });
-      if (mirrorCheck && mirrorCheck.syncFingerprint === fingerprint) {
-        syncLogger.info({ userId, sourceEventId }, '🔄 LOOP PREVENTED — mirror fingerprint match');
-        return;
-      }
     }
   }
 
@@ -203,7 +224,50 @@ async function processEventChange(
 
   // 4. Handle deletion
   if (isCancelled) {
-    await handleEventDeletion(userId, calendar, existingEvent, targetProvider, idempotencyKey);
+    await handleEventDeletion(userId, existingEvent, sourcePlatformLit);
+    return;
+  }
+
+  // 4a. Handle mirror-side edit. If the incoming webhook is for our
+  // mirror (isMirrorOfRow), propagate the edited content back to the
+  // SOURCE side so the canonical event reflects the user's change. We
+  // can't flip the row's identity (sourcePlatform/sourceEventId) so we
+  // re-use the existingEvent row, just refreshing its content fields.
+  if (isMirrorOfRow && existingEvent && existingEvent.sourceEventId && existingEvent.sourcePlatform) {
+    try {
+      const sourceCal = await db.calendar.findFirst({
+        where: { userId, provider: existingEvent.sourcePlatform, isPrimary: true },
+      });
+      if (sourceCal) {
+        if (existingEvent.sourcePlatform === 'GOOGLE') {
+          await updateGoogleEvent(
+            userId, sourceCal.externalCalendarId, existingEvent.sourceEventId,
+            normalizedEvent as CanonicalEvent,
+          );
+        } else {
+          await updateMicrosoftEvent(
+            userId, existingEvent.sourceEventId, normalizedEvent as CanonicalEvent,
+          );
+        }
+      }
+    } catch (err) {
+      syncLogger.error({ userId, err: (err as Error).message }, 'Mirror-side edit propagation failed');
+    }
+    // Refresh local row's content (but NOT identity) and bump fingerprint
+    // so the source-side webhook that will fire next sees a match and skips.
+    await db.event.update({
+      where: { id: existingEvent.id },
+      data: {
+        title: encrypt(normalizedEvent.title || ''),
+        description: encrypt(normalizedEvent.description || ''),
+        location: encrypt(normalizedEvent.location || ''),
+        startTime: normalizedEvent.startTime!,
+        endTime: normalizedEvent.endTime!,
+        syncFingerprint: fingerprint,
+        lastModifiedAt: new Date(),
+      },
+    });
+    syncLogger.info({ userId, sourceEventId, propagatedTo: existingEvent.sourcePlatform }, '↩️  Mirror edit propagated back to source');
     return;
   }
 
@@ -364,32 +428,69 @@ async function updateMirrorEvent(
 
 async function handleEventDeletion(
   userId: string,
-  calendar: any,
   existingEvent: any,
-  targetProvider: CalendarProvider,
-  idempotencyKey: string
+  deleteOriginatedOn: 'GOOGLE' | 'MICROSOFT',
 ): Promise<void> {
-  if (!existingEvent?.mirrorEventId) return;
+  if (!existingEvent) return;
 
   const db = getDatabase();
+  const sourceSideWasDeleted = existingEvent.sourcePlatform === deleteOriginatedOn;
+
   try {
-    if (targetProvider === CalendarProvider.GOOGLE) {
-      const targetCal = await db.calendar.findFirst({
-        where: { userId, provider: 'GOOGLE', isPrimary: true },
-      });
-      if (targetCal) await deleteGoogleEvent(userId, targetCal.externalCalendarId, existingEvent.mirrorEventId);
+    if (sourceSideWasDeleted) {
+      // The origin row's source event was deleted by the user — propagate
+      // the delete to the mirror in the OTHER provider.
+      if (existingEvent.mirrorEventId && existingEvent.mirrorPlatform) {
+        if (existingEvent.mirrorPlatform === 'GOOGLE') {
+          const targetCal = await db.calendar.findFirst({
+            where: { userId, provider: 'GOOGLE', isPrimary: true },
+          });
+          if (targetCal) {
+            await deleteGoogleEvent(
+              userId, targetCal.externalCalendarId, existingEvent.mirrorEventId,
+            );
+          }
+        } else {
+          await deleteMicrosoftEvent(userId, existingEvent.mirrorEventId);
+        }
+      }
     } else {
-      await deleteMicrosoftEvent(userId, existingEvent.mirrorEventId);
+      // The MIRROR side was deleted by the user — propagate by deleting
+      // the SOURCE event on its original provider (existingEvent.sourceEventId
+      // on existingEvent.sourcePlatform).
+      if (existingEvent.sourceEventId && existingEvent.sourcePlatform) {
+        if (existingEvent.sourcePlatform === 'GOOGLE') {
+          const sourceCal = await db.calendar.findFirst({
+            where: { userId, provider: 'GOOGLE', isPrimary: true },
+          });
+          if (sourceCal) {
+            await deleteGoogleEvent(
+              userId, sourceCal.externalCalendarId, existingEvent.sourceEventId,
+            );
+          }
+        } else {
+          await deleteMicrosoftEvent(userId, existingEvent.sourceEventId);
+        }
+      }
     }
 
-    await db.event.update({
-      where: { id: existingEvent.id },
-      data: { status: 'CANCELLED', syncState: 'SYNCED' },
-    });
+    // Remove our row entirely so the next webhook won't try to re-process it.
+    await db.event.delete({ where: { id: existingEvent.id } });
 
-    syncLogger.info({ userId, eventId: existingEvent.id }, '🗑️ Event deleted on both platforms');
+    syncLogger.info(
+      { userId, eventId: existingEvent.id, deleteOriginatedOn, sourceSideWasDeleted },
+      '🗑️ Event deleted on both platforms',
+    );
   } catch (error) {
-    syncLogger.error({ userId, error }, 'Failed to delete mirror event');
+    // Best-effort: even if the cross-provider delete fails (already gone,
+    // permission revoked, etc.), drop our local row so it doesn't keep
+    // showing up. The other side can be cleaned up manually or by the
+    // next sync.
+    syncLogger.error(
+      { userId, err: (error as Error).message, stack: (error as Error).stack },
+      'Failed to delete cross-platform mirror — removing local row anyway',
+    );
+    await db.event.delete({ where: { id: existingEvent.id } }).catch(() => {});
   }
 }
 
