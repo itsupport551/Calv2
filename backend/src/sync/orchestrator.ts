@@ -340,9 +340,63 @@ async function processEventChange(
     existingEvent?.id
   );
 
+  // Idempotency for auto-reject: if we already auto-rejected this event
+  // in a previous webhook (status=CANCELLED + conflictState=RESOLVED on
+  // the existing row), short-circuit. Without this, the PATCH we send
+  // to decline the invite fires another webhook → we'd auto-reject again
+  // (and queue another rejection email) on every loop iteration before
+  // Google's idempotent PATCH finally damps it.
+  if (existingEvent
+      && existingEvent.status === 'CANCELLED'
+      && existingEvent.conflictState === 'RESOLVED') {
+    syncLogger.info({ userId, sourceEventId }, '↩️  Event already auto-rejected — skipping re-process');
+    return;
+  }
+
   if (conflictResult.hasConflict && conflictResult.recommendation === 'auto_reject') {
     syncLogger.info({ userId, sourceEventId, conflicts: conflictResult.conflicts.length }, 'Conflict detected — auto-rejecting');
     await handleAutoRejection(userId, normalizedEvent as any, conflictResult, calendar, idempotencyKey);
+
+    // Persist a marker row so the post-decline webhook (Google/MS fires
+    // one because the PATCH changed the event) sees existingEvent with
+    // status=CANCELLED + conflictState=RESOLVED and short-circuits via
+    // the check above.
+    const markerGuid = existingEvent?.globalEventUuid || `csync-${uuidv4()}`;
+    const markerData = {
+      calendarId: calendar.id,
+      globalEventUuid: markerGuid,
+      sourcePlatform: sourcePlatformLit,
+      sourceEventId,
+      syncFingerprint: fingerprint,
+      idempotencyKey,
+      syncVersion: version,
+      title: encrypt(normalizedEvent.title || ''),
+      description: encrypt(normalizedEvent.description || ''),
+      startTime: normalizedEvent.startTime!,
+      endTime: normalizedEvent.endTime!,
+      timezone: normalizedEvent.timezone || 'UTC',
+      isAllDay: normalizedEvent.isAllDay || false,
+      location: encrypt(normalizedEvent.location || ''),
+      status: 'CANCELLED' as const,
+      conflictState: 'RESOLVED' as const,
+      visibility: mapVisibilityToEnum(normalizedEvent.visibility),
+      showAs: mapShowAsToEnum(normalizedEvent.showAs),
+      organizerEmail: normalizedEvent.organizerEmail || '',
+      organizerName: normalizedEvent.organizerName || '',
+      isOrganizer: normalizedEvent.isOrganizer || false,
+      attendees: JSON.stringify(normalizedEvent.attendees || []),
+      meetingLink: normalizedEvent.meetingLink || '',
+      syncState: 'SKIPPED' as const,
+      originPlatform: sourcePlatformLit,
+      lastModifiedAt: normalizedEvent.lastModifiedAt || new Date(),
+      lastModifiedBy: normalizedEvent.organizerEmail || 'system',
+      etag: normalizedEvent.etag || '',
+    };
+    if (existingEvent) {
+      await db.event.update({ where: { id: existingEvent.id }, data: markerData });
+    } else {
+      await db.event.create({ data: markerData });
+    }
     return;
   }
 
