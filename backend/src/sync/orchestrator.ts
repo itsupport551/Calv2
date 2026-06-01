@@ -373,7 +373,23 @@ async function processEventChange(
     return;
   }
 
-  if (conflictResult.hasConflict && conflictResult.recommendation === 'auto_reject') {
+  // Auto-rejection is for INCOMING INVITES from other people, not events
+  // the user created themselves. If the user is the organizer, this is
+  // their own event — they consciously scheduled it during the conflict
+  // window. Sync it as a normal event, log the conflict (so the dashboard
+  // surfaces it), but do NOT decline or skip mirroring.
+  const isUserOrganized = normalizedEvent.isOrganizer === true;
+
+  if (conflictResult.hasConflict && isUserOrganized) {
+    syncLogger.info(
+      { userId, sourceEventId, conflicts: conflictResult.conflicts.length },
+      'Self-organized event has a conflict — recording but still mirroring (user chose to schedule it)',
+    );
+  }
+
+  if (conflictResult.hasConflict
+      && conflictResult.recommendation === 'auto_reject'
+      && !isUserOrganized) {
     syncLogger.info({ userId, sourceEventId, conflicts: conflictResult.conflicts.length }, 'Conflict detected — auto-rejecting');
     await handleAutoRejection(userId, normalizedEvent as any, conflictResult, calendar, idempotencyKey);
 
