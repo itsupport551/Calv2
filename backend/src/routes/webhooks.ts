@@ -130,7 +130,9 @@ router.post('/microsoft', async (req: Request, res: Response) => {
       });
 
       if (!subscription) {
-        webhookLogger.warn({ subscriptionId }, 'Unknown Microsoft webhook subscription');
+        // Common after a reconnect/disconnect — MS keeps firing the old
+        // subscription for up to 3 days. Not an error.
+        webhookLogger.debug({ subscriptionId }, 'Webhook for unknown Microsoft subscription — discarding (stale)');
         continue;
       }
 

@@ -198,7 +198,7 @@ export async function createMicrosoftSubscription(
   userId: string,
   calendarId: string,
   webhookUrl: string
-): Promise<{ subscriptionId: string; expiration: Date }> {
+): Promise<{ subscriptionId: string; expiration: Date; clientState: string }> {
   const client = await getMicrosoftGraphClient(userId);
   const clientState = uuidv4();
 
@@ -213,6 +213,11 @@ export async function createMicrosoftSubscription(
   return {
     subscriptionId: response.id,
     expiration: new Date(response.expirationDateTime),
+    // Return the random clientState so the caller can persist it on the
+    // WebhookSubscription row. Without this round-trip the row stores a
+    // different value (e.g. userId) and every incoming notification gets
+    // flagged as "clientState mismatch — potential spoofing".
+    clientState,
   };
 }
 

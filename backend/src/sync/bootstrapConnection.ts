@@ -150,7 +150,9 @@ export async function bootstrapMicrosoftConnection(userId: string): Promise<void
             channelId: sub.subscriptionId,
             resourceId: externalCalendarId,
             webhookUrl,
-            clientState: userId,
+            // Must match what MS Graph has on its end so the handler's
+            // spoofing check accepts incoming notifications.
+            clientState: sub.clientState,
             expiresAt: sub.expiration,
             status: 'ACTIVE',
           },

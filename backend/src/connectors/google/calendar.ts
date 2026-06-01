@@ -35,7 +35,13 @@ export async function getGoogleAuthClient(userId: string): Promise<OAuth2Client>
     },
   });
 
-  if (!user?.googleAccessToken || !user?.googleRefreshToken) {
+  // Access token is the hard requirement. Refresh token is optional —
+  // Google only returns a fresh refresh_token on first consent or when
+  // prompt=consent is honored, and sometimes omits it on reconsent.
+  // Without it we still work for ~1 hour until the access token expires;
+  // after that the user will need to reconnect. Far better than refusing
+  // every API call the moment Google decided not to give us a refresh.
+  if (!user?.googleAccessToken) {
     throw new Error('Google account not connected');
   }
 
@@ -45,26 +51,40 @@ export async function getGoogleAuthClient(userId: string): Promise<OAuth2Client>
     config.google.redirectUri
   );
 
-  oauth2Client.setCredentials({
+  const credentials: any = {
     access_token: decrypt(user.googleAccessToken),
-    refresh_token: decrypt(user.googleRefreshToken),
     expiry_date: user.googleTokenExpiresAt?.getTime(),
-  });
+  };
+  if (user.googleRefreshToken) {
+    credentials.refresh_token = decrypt(user.googleRefreshToken);
+  }
+  oauth2Client.setCredentials(credentials);
 
-  // Auto-refresh if expired
-  if (user.googleTokenExpiresAt && new Date() >= user.googleTokenExpiresAt) {
+  // Auto-refresh if expired AND we have a refresh token to do so with.
+  if (
+    user.googleRefreshToken &&
+    user.googleTokenExpiresAt &&
+    new Date() >= user.googleTokenExpiresAt
+  ) {
     syncLogger.info({ userId }, 'Refreshing expired Google token');
-    const { credentials } = await oauth2Client.refreshAccessToken();
-    oauth2Client.setCredentials(credentials);
-
-    // Store refreshed token
-    await db.user.update({
-      where: { id: userId },
-      data: {
-        googleAccessToken: encrypt(credentials.access_token!),
-        googleTokenExpiresAt: new Date(credentials.expiry_date!),
-      },
-    });
+    try {
+      const { credentials: fresh } = await oauth2Client.refreshAccessToken();
+      oauth2Client.setCredentials(fresh);
+      await db.user.update({
+        where: { id: userId },
+        data: {
+          googleAccessToken: encrypt(fresh.access_token!),
+          googleTokenExpiresAt: new Date(fresh.expiry_date!),
+          // Google sometimes rotates the refresh token — persist if so.
+          googleRefreshToken: fresh.refresh_token
+            ? encrypt(fresh.refresh_token)
+            : user.googleRefreshToken,
+        },
+      });
+    } catch (err) {
+      syncLogger.error({ userId, err: (err as Error).message }, 'Google refresh failed — user must reconnect');
+      throw err;
+    }
   }
 
   return oauth2Client;

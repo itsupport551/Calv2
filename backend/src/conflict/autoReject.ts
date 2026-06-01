@@ -45,7 +45,15 @@ export async function handleAutoRejection(
         ? mainConflict.existingEvent.eventId
         : null;
 
-    if (existingEventId) {
+    // The detector can return existingEvent.eventId values that are NOT
+    // valid UUIDs — for example, raw Google event ids ("g_abc123…") for
+    // events the conflict-detector found via free/busy without a matching
+    // row in our table. Prisma rejects those with "Inconsistent column
+    // data: Error creating UUID". Validate format first.
+    const isUuid = (s: string) =>
+      /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(s);
+
+    if (existingEventId && isUuid(existingEventId)) {
       // Verify the id actually exists — fingerprint/OOF detectors can
       // produce synthetic ids that look like UUIDs but don't match a row.
       const exists = await db.event.findUnique({
