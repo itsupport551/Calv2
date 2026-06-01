@@ -159,7 +159,7 @@ export async function declineMicrosoftEvent(
       sendResponse: true,
     });
     syncLogger.info({ userId, eventId }, 'Declined Microsoft invite');
-  }, 'declineMicrosoftEvent');
+  }, 'declineMicrosoftEvent', { maxRetries: 1 });
 }
 
 /**

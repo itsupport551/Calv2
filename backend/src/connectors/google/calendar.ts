@@ -280,7 +280,7 @@ export async function declineGoogleEvent(
       requestBody: { attendees },
     });
     syncLogger.info({ userId, calendarId, eventId }, 'Declined Google invite');
-  }, 'declineGoogleEvent');
+  }, 'declineGoogleEvent', { maxRetries: 1 }); // decline is idempotent; one retry is plenty
 }
 
 /**

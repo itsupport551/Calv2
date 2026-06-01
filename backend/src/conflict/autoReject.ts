@@ -107,43 +107,52 @@ export async function handleAutoRejection(
       },
     });
 
-    // 3. Actually decline the invite on the source provider.
-    //    Only do this when the user is NOT the organizer (we don't
-    //    auto-decline our own events) AND the event has an external id
-    //    (a real provider-side event, not a synthetic conflict marker).
+    // 3. Decline the invite on the source provider in the background.
+    //
+    // Don't await this. The provider decline goes through 5 retries (each
+    // with exponential backoff) — for a Microsoft Graph 4xx it can take
+    // 30-45 seconds end to end. Awaiting it inside the bootstrap meant
+    // every conflicting event delayed the next one by that much, so a
+    // user with several conflicts saw the dashboard table fill up slowly
+    // over minutes. By detaching the decline, the marker row save + email
+    // queue happen instantly, the dashboard shows the event in seconds,
+    // and the actual API decline lands in the background.
     if (!event.isOrganizer && event.sourceEventId && calendar?.externalCalendarId) {
       const reason = buildRejectionReason(conflictResult);
-      try {
-        if (calendar.provider === 'GOOGLE') {
-          // Look up the user's email — we need it to identify ourselves
-          // in the attendees list when declining.
-          const me = await db.user.findUnique({
-            where: { id: userId },
-            select: { email: true },
-          });
-          if (me?.email) {
-            await declineGoogleEvent(
-              userId,
-              calendar.externalCalendarId,
-              event.sourceEventId,
-              me.email,
-            );
+      const sourceEventId = event.sourceEventId;
+      const calendarProvider = calendar.provider;
+      const externalCalendarId = calendar.externalCalendarId;
+
+      void (async () => {
+        try {
+          if (calendarProvider === 'GOOGLE') {
+            const me = await db.user.findUnique({
+              where: { id: userId },
+              select: { email: true },
+            });
+            if (me?.email) {
+              await declineGoogleEvent(userId, externalCalendarId, sourceEventId, me.email);
+            }
+          } else if (calendarProvider === 'MICROSOFT') {
+            await declineMicrosoftEvent(userId, sourceEventId, reason);
           }
-        } else if (calendar.provider === 'MICROSOFT') {
-          await declineMicrosoftEvent(userId, event.sourceEventId, reason);
+          conflictLogger.info(
+            { userId, sourceEventId, provider: calendarProvider },
+            'Invite declined on source provider',
+          );
+        } catch (err) {
+          conflictLogger.error(
+            {
+              userId,
+              sourceEventId,
+              provider: calendarProvider,
+              err: (err as Error).message,
+              stack: (err as Error).stack,
+            },
+            'Failed to decline invite on source provider',
+          );
         }
-        conflictLogger.info(
-          { userId, sourceEventId: event.sourceEventId, provider: calendar.provider },
-          'Invite declined on source provider',
-        );
-      } catch (err) {
-        // Don't fail the whole auto-rejection if the provider call errors —
-        // the conflict log + email still go out so the user is informed.
-        conflictLogger.error(
-          { userId, sourceEventId: event.sourceEventId, err: (err as Error).message },
-          'Failed to decline invite on source provider',
-        );
-      }
+      })();
     }
 
     // 4. Audit log
