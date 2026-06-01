@@ -32,6 +32,7 @@ export async function getGoogleAuthClient(userId: string): Promise<OAuth2Client>
       googleAccessToken: true,
       googleRefreshToken: true,
       googleTokenExpiresAt: true,
+      googleConnected: true,
     },
   });
 
@@ -42,6 +43,17 @@ export async function getGoogleAuthClient(userId: string): Promise<OAuth2Client>
   // after that the user will need to reconnect. Far better than refusing
   // every API call the moment Google decided not to give us a refresh.
   if (!user?.googleAccessToken) {
+    syncLogger.warn(
+      {
+        userId,
+        userExists: !!user,
+        googleConnected: user?.googleConnected,
+        hasAccessToken: !!user?.googleAccessToken,
+        hasRefreshToken: !!user?.googleRefreshToken,
+        tokenExpiry: user?.googleTokenExpiresAt,
+      },
+      'getGoogleAuthClient: Google not connected — DB row missing access token',
+    );
     throw new Error('Google account not connected');
   }
 

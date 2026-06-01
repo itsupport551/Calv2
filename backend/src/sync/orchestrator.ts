@@ -49,6 +49,26 @@ export async function processSyncWebhook(
       return;
     }
 
+    // 1a. SOURCE-side connection guard. Listing events on the source
+    // provider needs that provider's tokens. If the user has since
+    // disconnected this provider (but a stale webhook is still firing —
+    // Google channels live 7d, MS subscriptions 3d), just skip cleanly
+    // instead of throwing "Google account not connected" and retrying
+    // five times. This silently drops what we couldn't have synced
+    // anyway.
+    const u = calendar.user as any;
+    const sourceConnected =
+      provider === CalendarProvider.GOOGLE
+        ? !!(u?.googleConnected && u?.googleAccessToken)
+        : !!(u?.microsoftConnected && u?.microsoftAccessToken);
+    if (!sourceConnected) {
+      syncLogger.info(
+        { userId, provider, calendarId },
+        'Source provider not connected — skipping (likely a stale webhook for a now-disconnected account)',
+      );
+      return;
+    }
+
     // 2. Fetch changed events from source platform
     let changedEvents: any[] = [];
     let newSyncToken: string | null = null;
