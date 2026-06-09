@@ -592,7 +592,17 @@ async function createMirrorEvent(
       return created.id || null;
     }
   } catch (error) {
-    syncLogger.error({ userId, error }, 'Failed to create mirror event');
+    // Render the Error object explicitly — pino logs raw Error instances
+    // as {} which silently buried the actual cause of every failed mirror
+    // create. Now the deploy log will name the real reason (e.g. "Google
+    // quota exceeded", "Invalid attendee", "401 Unauthorized").
+    const err = error instanceof Error
+      ? { errMessage: error.message, errStack: error.stack, errName: error.name }
+      : { error };
+    syncLogger.error(
+      { userId, targetProvider, targetCalendarId: targetCalendar?.externalCalendarId, ...err },
+      'Failed to create mirror event',
+    );
     return null;
   }
 }
@@ -613,7 +623,13 @@ async function updateMirrorEvent(
     }
     return mirrorEventId;
   } catch (error) {
-    syncLogger.error({ userId, mirrorEventId, error }, 'Failed to update mirror event');
+    const err = error instanceof Error
+      ? { errMessage: error.message, errStack: error.stack, errName: error.name }
+      : { error };
+    syncLogger.error(
+      { userId, mirrorEventId, targetProvider, ...err },
+      'Failed to update mirror event',
+    );
     return null;
   }
 }
